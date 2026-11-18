@@ -531,4 +531,9 @@ test('12개 읍·면·동 1시간 단기예보(SHORT_TERM_12_REGIONS), 강수·�
   assert.equal(parsedCustom.length, 2);
   assert.equal(parsedCustom[0].key, '35.644,127.910');
   assert.equal(parsedCustom[1].key, '35.566,127.774');
+
+  // hourly 정시 자동 새로고침 타이머 계산 검증
+  const { msUntilNextTopOfHour } = await import('../public/hourly.js');
+  assert.equal(msUntilNextTopOfHour(Date.parse('2026-11-19T05:57:30+09:00'), 1500), 151500);
+  assert.equal(msUntilNextTopOfHour(Date.parse('2026-11-19T06:00:00+09:00'), 1500), 3601500);
 });

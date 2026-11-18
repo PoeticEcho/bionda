@@ -230,7 +230,8 @@ async function fetchShortTerm12(env, force = false) {
   const now = Date.now();
   const sBase = baseShort(now);
   const uBase = baseUltra(now);
-  const cacheKey = `short12|${datePart(sBase)}|${timePart(sBase)}|${timePart(uBase)}`;
+  const curHour = timePart(kst(now)).slice(0, 2);
+  const cacheKey = `short12|${datePart(sBase)}|${timePart(sBase)}|${timePart(uBase)}|h${curHour}`;
   const hit = !force ? getCached(cacheKey) : null;
   if (hit) return hit;
 
@@ -679,8 +680,11 @@ export default {
       }
       try {
         const value = await fetchShortTerm12(env, isForced);
+        const secsToHour = Math.max(5, Math.ceil((3600000 - (Date.now() % 3600000)) / 1000));
+        const maxAge = Math.min(180, secsToHour);
+        const sMaxAge = Math.min(300, secsToHour);
         const res = jsonResponse(request, env, 200, value, {
-          'Cache-Control': isForced ? 'no-store' : 'public, max-age=180, s-maxage=300, stale-while-revalidate=600'
+          'Cache-Control': isForced ? 'no-store' : `public, max-age=${maxAge}, s-maxage=${sMaxAge}, stale-while-revalidate=60`
         });
         if (!isForced) putEdgeCache(ctx, cacheKeyReq, res);
         return res;
