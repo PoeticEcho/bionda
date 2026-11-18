@@ -427,8 +427,56 @@ test('12개 읍·면·동 1시간 단기예보(SHORT_TERM_12_REGIONS), 강수·�
 
   assert.equal(core.SHORT_TERM_12_REGIONS.length, 12);
   assert.ok(core.SHORT_TERM_12_REGIONS.some(r => r.county === '고령군' && r.name === '대가야읍'));
-  assert.equal(new Set(core.SHORT_TERM_12_REGIONS.map(r => `${r.grid.nx},${r.grid.ny}`)).size, 12);
+  assert.equal(new Set(core.SHORT_TERM_12_REGIONS.map(r => `${r.grid.nx},${r.grid.ny}`)).size, 11);
+  const byId = Object.fromEntries(core.SHORT_TERM_12_REGIONS.map(r => [r.id, r]));
+  assert.deepEqual(byId.jigok.grid, { nx: 74, ny: 83 });
+  assert.deepEqual(byId.sudong.grid, { nx: 75, ny: 82 });
+  assert.deepEqual(byId.namha.grid, { nx: 77, ny: 86 });
+  assert.deepEqual(byId.geochang.grid, { nx: 77, ny: 86 });
+  assert.deepEqual(byId.okpo.grid, { nx: 87, ny: 89 });
   assert.deepEqual(core.SHORT_TERM_12_REGIONS.map(r => r.routeOrder).sort((a, b) => a - b), [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12]);
+
+  // 고유 격자(11개) 중복 제거 호출 및 초단기(+1h~+6h) 시작 시각 정렬 검증
+  let shortCalls = 0;
+  let ultraCalls = 0;
+  const fixedNow = Date.parse('2026-11-19T04:40:00+09:00');
+  const pad2 = n => String(n).padStart(2, '0');
+  const samplePayload = await core.collectShortTerm12({
+    now: fixedNow,
+    fetchShort: async () => {
+      shortCalls++;
+      return {
+        base: '2026-11-19T02:00:00+09:00',
+        items: [3, 4, 5, 6, 7, 8, 9, 10, 11].flatMap(h => [
+          { fcstDate: '20261119', fcstTime: `${pad2(h)}00`, category: 'TMP', fcstValue: h === 4 ? '1' : '3' },
+          { fcstDate: '20261119', fcstTime: `${pad2(h)}00`, category: 'SKY', fcstValue: '3' },
+          { fcstDate: '20261119', fcstTime: `${pad2(h)}00`, category: 'PTY', fcstValue: '0' },
+          { fcstDate: '20261119', fcstTime: `${pad2(h)}00`, category: 'POP', fcstValue: '20' }
+        ])
+      };
+    },
+    fetchUltra: async () => {
+      ultraCalls++;
+      return {
+        base: '2026-11-19T04:30:00+09:00',
+        items: [5, 6, 7, 8, 9, 10].flatMap(h => [
+          { fcstDate: '20261119', fcstTime: `${pad2(h)}00`, category: 'T1H', fcstValue: h === 5 ? '4' : '3' },
+          { fcstDate: '20261119', fcstTime: `${pad2(h)}00`, category: 'SKY', fcstValue: h === 5 ? '3' : '4' },
+          { fcstDate: '20261119', fcstTime: `${pad2(h)}00`, category: 'PTY', fcstValue: '0' }
+        ])
+      };
+    }
+  });
+  assert.equal(shortCalls, 11);
+  assert.equal(ultraCalls, 11);
+  assert.equal(samplePayload.uniqueGridCount, 11);
+  const jigokOut = samplePayload.regions.find(r => r.id === 'jigok');
+  assert.equal(jigokOut.hours[0].hourKst, 5);
+  assert.equal(jigokOut.hours[0].temp, 4);
+  assert.equal(jigokOut.hours[1].hourKst, 6);
+  assert.equal(jigokOut.hours[1].temp, 3);
+  const geochangOut = samplePayload.regions.find(r => r.id === 'geochang');
+  assert.deepEqual(geochangOut.sharedGridRegions, ['거창군 남하면']);
 
   const sampleHours = [
     { offset: 0, time: '2026-11-19T01:00:00+09:00', temp: 2, wet: false, pop: 20, rainMm: 0, snowCm: 0, wind: 1.5 },

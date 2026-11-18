@@ -212,7 +212,7 @@ test('Cloudflare Worker는 CORS·OPTIONS·health·도로관측(중복 Ncst 생�
     const s12 = await s12Res.json();
     assert.equal(s12.ok, true);
     assert.equal(s12.regions.length, 12);
-    assert.equal(s12.uniqueGridCount, 12);
+    assert.equal(s12.uniqueGridCount, 11);
     assert.equal(s12.windowKPIs.h12.wetRegions, 12);
     assert.ok(s12.windowKPIs.h12.freezingRegions >= 1);
     assert.ok(s12.windowKPIs.h12.overlapRegions >= 1);

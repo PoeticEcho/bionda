@@ -1,0 +1,1879 @@
+// Auto-generated standalone single-file Cloudflare Worker bundle
+// Build: npm run build:worker
+
+/**
+ * 비온다? × 날씨봇 — 런타임 공통 순수 KMA 파싱·격자·도로관측·특보 엔진
+ * Node.js (server.js)와 Cloudflare Workers (cloudflare/worker.js)가 동일 로직을 공유합니다.
+ */
+const DATA_GO_KR_BASE = 'https://apis.data.go.kr/1360000/VilageFcstInfoService_2.0/';
+const APIHUB_FCST_BASE = 'https://apihub.kma.go.kr/api/typ02/openApi/VilageFcstInfoService_2.0/';
+
+function getServiceKey(env = {}) {
+  return env.KMA_SERVICE_KEY || env.KMA_API_KEY || env.KMA_ROAD_KEY || env.KMA_RADAR_KEY || '';
+}
+function getRadarKey(env = {}) {
+  return env.KMA_RADAR_KEY || env.KMA_SERVICE_KEY || env.KMA_API_KEY || env.KMA_ROAD_KEY || '';
+}
+function getRoadKey(env = {}) {
+  return env.KMA_ROAD_KEY || env.KMA_SERVICE_KEY || env.KMA_API_KEY || env.KMA_RADAR_KEY || '';
+}
+function getRoadLineCode(env = {}) {
+  return String(env.ROAD_LINE_CODE || '14');
+}
+
+const pad = (n) => String(n).padStart(2, '0');
+const kst = (d = Date.now()) => new Date(d + 9 * 3600000);
+const datePart = (d) => `${d.getUTCFullYear()}${pad(d.getUTCMonth() + 1)}${pad(d.getUTCDate())}`;
+const timePart = (d) => `${pad(d.getUTCHours())}${pad(d.getUTCMinutes())}`;
+const isoKst = (d) => `${d.getUTCFullYear()}-${pad(d.getUTCMonth() + 1)}-${pad(d.getUTCDate())}T${pad(d.getUTCHours())}:${pad(d.getUTCMinutes())}:00+09:00`;
+const deEncodedKey = (key) => { try { return decodeURIComponent(key); } catch { return key; } };
+
+function errMessage(e) {
+  return String(e?.message || e).slice(0, 160).replace(/(ServiceKey|authKey)=[^& ]+/gi, '$1=[REDACTED]');
+}
+
+function baseUltra(now) {
+  const d = kst(now);
+  // KMA APIHub 초단기예보는 매시 30분대 중반(35분 무렵)부터 당해 시각(HH00, +1~+6h) 발표분이 조회 가능하므로
+  // 35분 미만이면 직전 시각 HH30을 우선 시도하고, 아직 미생성 시 호출부 fallback으로 직전 발표분을 사용한다.
+  if (d.getUTCMinutes() < 35) d.setUTCHours(d.getUTCHours() - 1);
+  d.setUTCMinutes(30, 0, 0);
+  return d;
+}
+function baseShort(now) {
+  const d = kst(now - 20 * 60000);
+  const slots = [2, 5, 8, 11, 14, 17, 20, 23];
+  let hour = slots.filter(x => x <= d.getUTCHours()).at(-1);
+  if (hour === undefined) { d.setUTCDate(d.getUTCDate() - 1); hour = 23; }
+  d.setUTCHours(hour, 0, 0, 0);
+  return d;
+}
+function baseObservation(now) {
+  const d = kst(now - 25 * 60000);
+  d.setUTCMinutes(0, 0, 0);
+  return d;
+}
+
+/** KMA's Lambert Conformal Conic DFS grid transform (official grid constants). */
+function latlonToGrid(lat, lon) {
+  const RE = 6371.00877, GRID = 5.0, SLAT1 = 30.0, SLAT2 = 60.0, OLON = 126.0, OLAT = 38.0, XO = 43, YO = 136;
+  const DEGRAD = Math.PI / 180;
+  const re = RE / GRID, slat1 = SLAT1 * DEGRAD, slat2 = SLAT2 * DEGRAD, olon = OLON * DEGRAD, olat = OLAT * DEGRAD;
+  let sn = Math.tan(Math.PI * 0.25 + slat2 * 0.5) / Math.tan(Math.PI * 0.25 + slat1 * 0.5);
+  sn = Math.log(Math.cos(slat1) / Math.cos(slat2)) / Math.log(sn);
+  let sf = Math.tan(Math.PI * 0.25 + slat1 * 0.5);
+  sf = Math.pow(sf, sn) * Math.cos(slat1) / sn;
+  let ro = Math.tan(Math.PI * 0.25 + olat * 0.5);
+  ro = re * sf / Math.pow(ro, sn);
+  let ra = Math.tan(Math.PI * 0.25 + lat * DEGRAD * 0.5);
+  ra = re * sf / Math.pow(ra, sn);
+  let theta = lon * DEGRAD - olon;
+  if (theta > Math.PI) theta -= 2 * Math.PI;
+  if (theta < -Math.PI) theta += 2 * Math.PI;
+  theta *= sn;
+  return { nx: Math.floor(ra * Math.sin(theta) + XO + 0.5), ny: Math.floor(ro - ra * Math.cos(theta) + YO + 0.5) };
+}
+
+function grouped(items, field = 'fcstValue') {
+  const out = new Map();
+  for (const item of items || []) {
+    const key = `${item.fcstDate || item.baseDate}${item.fcstTime || item.baseTime}`;
+    if (!out.has(key)) out.set(key, {});
+    out.get(key)[item.category] = String(item[field]);
+  }
+  return out;
+}
+function precipType(pty) {
+  return ({ '0': '없음', '1': '비', '2': '비·눈', '3': '눈', '4': '소나기', '5': '빗방울', '6': '빗방울·눈날림', '7': '눈날림' })[String(pty)] || '강수';
+}
+function skyText(sky, pty) {
+  const p = String(pty ?? '0');
+  if (p !== '0') return precipType(p);
+  const s = String(sky ?? '');
+  if (s === '1') return '맑음';
+  if (s === '3') return '구름많음';
+  if (s === '4') return '흐림';
+  return '대체로 맑음';
+}
+function kmaToWmoCode(sky, pty) {
+  const p = String(pty ?? '0');
+  if (p === '1' || p === '4') return 61;
+  if (p === '2' || p === '6') return 68;
+  if (p === '3' || p === '7') return 71;
+  if (p === '5') return 51;
+  const s = String(sky ?? '1');
+  if (s === '1') return 0;
+  if (s === '3') return 2;
+  if (s === '4') return 3;
+  return 1;
+}
+function amountNumber(v) {
+  if (!v || /강수없음|적설없음|없음/.test(v)) return 0;
+  if (/미만/.test(v)) return 0.1;
+  return Number.parseFloat(v) || 0;
+}
+const WIND_DIRS_16 = ['북', '북북동', '북동', '동북동', '동', '동남동', '남동', '남남동', '남', '남남서', '남서', '서남서', '서', '서북서', '북서', '북북서'];
+function windDirKo(deg) {
+  if (deg == null || !Number.isFinite(Number(deg))) return '-';
+  const idx = Math.floor(((Number(deg) % 360) + 360 + 11.25) / 22.5) % 16;
+  return WIND_DIRS_16[idx];
+}
+function classify(hour) {
+  const pty = String(hour.PTY ?? '0');
+  const rainMm = amountNumber(hour.RN1 ?? hour.PCP);
+  const snowCm = amountNumber(hour.SNO);
+  const prob = hour.POP == null ? null : Number(hour.POP);
+  const wet = pty !== '0' || rainMm > 0 || snowCm > 0;
+  const wsd = hour.WSD != null && Number.isFinite(Number(hour.WSD)) ? Number(hour.WSD) : null;
+  const vec = hour.VEC != null && Number.isFinite(Number(hour.VEC)) ? Number(hour.VEC) : null;
+  return {
+    type: wet ? precipType(pty !== '0' ? pty : (snowCm > 0 ? '3' : '1')) : '없음',
+    wet,
+    pty,
+    chance: prob != null && Number.isFinite(prob) ? prob : null,
+    risk: !wet && prob != null && prob >= 50,
+    amount: hour.RN1 ?? hour.PCP ?? null,
+    rainMm,
+    snowCm,
+    temp: hour.T1H ?? hour.TMP ?? null,
+    humidity: hour.REH ?? null,
+    wind: wsd,
+    vec,
+    windDir: windDirKo(vec),
+    sky: hour.SKY ?? null,
+    skyLabel: skyText(hour.SKY, pty),
+    weatherCode: kmaToWmoCode(hour.SKY, pty),
+    snow: hour.SNO ?? null,
+    source: hour.__source || '단기예보'
+  };
+}
+function analyze(hourly, observed) {
+  const wet = hourly.map(h => !!h.wet);
+  const startIndex = wet.findIndex(Boolean);
+  let endIndex = null;
+  if (startIndex >= 0) {
+    for (let i = startIndex + 1; i < wet.length; i++) {
+      if (!wet[i] && !wet[i + 1] && wet[i + 1] !== undefined) { endIndex = i; break; }
+    }
+  }
+  const wetIndices = wet.reduce((acc, v, idx) => (v ? [...acc, idx] : acc), []);
+  const lastWetIndex = wetIndices.length ? wetIndices.at(-1) : -1;
+  const windowEndTime = hourly.length ? hourly.at(-1).time : null;
+  const allWindowWet = hourly.length > 0 && wet.every(Boolean);
+
+  let secondStartIndex = -1;
+  if (endIndex != null) {
+    for (let i = endIndex + 1; i < wet.length; i++) {
+      if (wet[i]) { secondStartIndex = i; break; }
+    }
+  }
+
+  const makeHorizon = n => {
+    const block = hourly.filter(h => h.offset <= n);
+    const possibilities = block.filter(h => h.wet || h.risk);
+    const precip = block.filter(h => h.wet);
+    return {
+      hours: n,
+      hasPrecipitation: precip.length > 0,
+      hasRisk: possibilities.length > 0,
+      kinds: [...new Set(precip.map(h => h.type))],
+      maxChance: block.some(h => h.chance != null) ? Math.max(...block.map(h => h.chance ?? 0)) : null
+    };
+  };
+  const makeRange = (minOffset, maxOffset, label) => {
+    const block = hourly.filter(h => h.offset >= minOffset && h.offset <= maxOffset);
+    const possibilities = block.filter(h => h.wet || h.risk);
+    const precip = block.filter(h => h.wet);
+    return {
+      label,
+      minOffset,
+      maxOffset,
+      hasPrecipitation: precip.length > 0,
+      hasRisk: possibilities.length > 0,
+      kinds: [...new Set(precip.map(h => h.type))],
+      maxChance: block.some(h => h.chance != null) ? Math.max(...block.map(h => h.chance ?? 0)) : null
+    };
+  };
+  return {
+    now: observed,
+    windowHours: hourly.length,
+    windowEndTime,
+    wetHoursCount: wetIndices.length,
+    allWindowWet,
+    lastWetTime: lastWetIndex >= 0 ? hourly[lastWetIndex].time : null,
+    secondStartTime: secondStartIndex >= 0 ? hourly[secondStartIndex].time : null,
+    start: startIndex >= 0 ? { time: hourly[startIndex].time, current: !!observed?.wet && startIndex === 0 } : null,
+    end: endIndex != null ? { time: hourly[endIndex].time, rule: '연속 2시간 무강수 예보' } : null,
+    extendsBeyondWindow: startIndex >= 0 && endIndex == null,
+    noRainSignal: startIndex === -1,
+    horizons: [makeHorizon(3), makeHorizon(6), makeHorizon(12)],
+    horizonRanges: [
+      makeRange(1, 3, '향후 3시간'),
+      makeRange(4, 6, '3~6시간'),
+      makeRange(7, 12, '향후 6~12시간')
+    ]
+  };
+}
+
+function buildForecastResult(grid, now, requests) {
+  const [ultra, short, actual] = requests.map(x => x.status === 'fulfilled' ? x.value : null);
+  if (!ultra && !short) throw new Error('초단기·단기 예보를 모두 가져오지 못했습니다. 발급된 API 키의 승인 여부를 확인하세요.');
+  const near = grouped(ultra?.items), far = grouped(short?.items);
+  const nowK = kst(now); nowK.setUTCMinutes(0, 0, 0);
+  const hourly = [];
+  for (let i = 1; i <= 12; i++) {
+    const d = new Date(nowK.getTime() + i * 3600000);
+    const key = datePart(d) + timePart(d);
+    const sourceNear = near.get(key), sourceFar = far.get(key);
+    const combined = { ...(sourceFar || {}), ...(sourceNear || {}), __source: sourceNear ? '초단기예보' : '단기예보' };
+    if (!sourceNear && !sourceFar) continue;
+    hourly.push({ time: isoKst(d), offset: i, ...classify(combined) });
+  }
+  const observations = actual?.items || [];
+  const values = {}; for (const o of observations) values[o.category] = o.obsrValue;
+  const observed = actual ? {
+    type: precipType(values.PTY || '0'),
+    wet: String(values.PTY || '0') !== '0' || amountNumber(values.RN1) > 0,
+    amount: values.RN1 ?? null,
+    temp: values.T1H ?? null,
+    humidity: values.REH ?? null,
+    wind: values.WSD ?? null,
+    time: actual.base
+  } : null;
+  return {
+    ok: true,
+    grid,
+    updatedAt: new Date().toISOString(),
+    sources: { ultra: ultra?.base || null, short: short?.base || null, observed: actual?.base || null },
+    notices: requests.filter(x => x.status === 'rejected').map(x => errMessage(x.reason)).slice(0, 3),
+    hours: hourly,
+    analysis: analyze(hourly, observed)
+  };
+}
+
+function parseKmaForecastJson(rawText) {
+  let obj;
+  try { obj = JSON.parse(rawText); } catch { throw new Error('기상청 응답을 JSON으로 읽지 못했습니다. 키 또는 서비스 승인 상태를 확인하세요.'); }
+  const response = obj?.response;
+  if (response?.header?.resultCode !== '00') throw new Error(`기상청 오류: ${response?.header?.resultMsg || '알 수 없음'}`);
+  const items = response?.body?.items?.item;
+  if (!Array.isArray(items) || !items.length) throw new Error('해당 발표시각에 제공되는 자료가 없습니다.');
+  return items;
+}
+
+/**
+ * 3.1.2 고속도로 노선으로 조회API (road_stn_obs.php?mode=2&var=14 무안광주대구선 → 실제 고속국도 제12호선)
+ * 이정(km)은 한국도로공사 고령지사 MMF 도로DB(roads-db-v3.json) 기준 실측 정합
+ */
+const ROUTE12_MILEPOST_BY_STN = {
+  '14402': { routeNo: '12', section: '무안광주선', km: 8.9 },
+  '14202': { routeNo: '12', section: '무안광주선', km: 12.4 },
+  '14403': { routeNo: '12', section: '무안광주선', km: 29.6 },
+  '14203': { routeNo: '12', section: '무안광주선', km: 38.8 },
+  '14404': { routeNo: '12', section: '무안광주선', km: 41.1 },
+  '14405': { routeNo: '12', section: '광주대구선', km: 19.2 },
+  '14204': { routeNo: '12', section: '광주대구선', km: 27.0 },
+  '14406': { routeNo: '12', section: '광주대구선', km: 30.6 },
+  '14302': { routeNo: '12', section: '광주대구선', km: 36.5 },
+  '14205': { routeNo: '12', section: '광주대구선', km: 50.8 },
+  '14407': { routeNo: '12', section: '광주대구선', km: 72.9 },
+  '14102': { routeNo: '12', section: '광주대구선', km: 75.4 },
+  '14408': { routeNo: '12', section: '광주대구선', km: 86.2 },
+  '14206': { routeNo: '12', section: '광주대구선', km: 95.0 },
+  '14409': { routeNo: '12', section: '광주대구선', km: 102.9 },
+  '14207': { routeNo: '12', section: '광주대구선', km: 115.3 },
+  '14208': { routeNo: '12', section: '광주대구선', km: 134.1 },
+  '14209': { routeNo: '12', section: '광주대구선', km: 158.2 },
+  '14103': { routeNo: '12', section: '광주대구선', km: 169.2 },
+  '14410': { routeNo: '12', section: '광주대구선', km: 171.3 }
+};
+
+const SURFACE_STATES = {
+  1: '건조',
+  2: '습윤',
+  3: '수막',
+  4: '적설',
+  5: '결빙',
+  6: '슬러시',
+  7: '소금물'
+};
+
+function parseRoadStations(rawText) {
+  const stations = [];
+  for (const rawLine of String(rawText || '').split(/\r?\n/)) {
+    const line = rawLine.trim();
+    if (!line || line.startsWith('#')) continue;
+    const parts = line.split(',').map(s => s.trim());
+    if (parts.length < 19) continue;
+    const tmRaw = parts[0];
+    const stnId = parts[1];
+    const name = parts[2];
+    const roadName = parts[3];
+    const stationType = parts[4];
+    const lat = Number(parts[5]);
+    const lon = Number(parts[6]);
+    const elevation = Number(parts[7]);
+    if (!Number.isFinite(lat) || !Number.isFinite(lon)) continue;
+    const numOrNull = (val, minValid = -90) => {
+      const n = Number(val);
+      return Number.isFinite(n) && n > minValid ? n : null;
+    };
+    const sfs = numOrNull(parts[8], 0);
+    const tr1 = numOrNull(parts[9], -80);
+    const vs = numOrNull(parts[10], 0);
+    const hm = numOrNull(parts[11], 0);
+    const rnDay = numOrNull(parts[12], -1);
+    const sd = numOrNull(parts[13], -1);
+    const ta = numOrNull(parts[14], -80);
+    const wd1 = numOrNull(parts[15], -1);
+    const ws1 = numOrNull(parts[16], -1);
+    const wsIns = numOrNull(parts[18], -1);
+    const ps = numOrNull(parts[19], 0);
+
+    let isoTime = null;
+    if (/^\d{12}$/.test(tmRaw)) {
+      isoTime = `${tmRaw.slice(0, 4)}-${tmRaw.slice(4, 6)}-${tmRaw.slice(6, 8)}T${tmRaw.slice(8, 10)}:${tmRaw.slice(10, 12)}:00+09:00`;
+    }
+    const mp = ROUTE12_MILEPOST_BY_STN[stnId] || null;
+    stations.push({
+      tm: tmRaw,
+      time: isoTime,
+      stnId,
+      name,
+      roadName,
+      routeNo: mp?.routeNo || '12',
+      roadSection: mp?.section || roadName,
+      milepostKm: mp?.km ?? null,
+      stationType,
+      lat,
+      lon,
+      elevation: Number.isFinite(elevation) ? elevation : null,
+      surfaceCode: sfs,
+      surfaceState: sfs ? (SURFACE_STATES[sfs] || '관측중') : null,
+      roadTemp: tr1,
+      visibility: vs,
+      humidity: hm,
+      dayPrecip: rnDay,
+      snowDepth: sd,
+      temp: ta,
+      windDir: wd1,
+      windSpeed: ws1,
+      gustSpeed: wsIns,
+      pressure: ps
+    });
+  }
+  return stations;
+}
+
+function distanceKm(lat1, lon1, lat2, lon2) {
+  const R = 6371.0;
+  const toRad = d => (d * Math.PI) / 180;
+  const dLat = toRad(lat2 - lat1);
+  const dLon = toRad(lon2 - lon1);
+  const a = Math.sin(dLat / 2) ** 2 + Math.cos(toRad(lat1)) * Math.cos(toRad(lat2)) * Math.sin(dLon / 2) ** 2;
+  return 2 * R * Math.asin(Math.sqrt(a));
+}
+
+function matchRoadStation(lat, lon, stations) {
+  if (!Array.isArray(stations) || !stations.length) return null;
+  const withDist = stations.map(s => ({ ...s, distanceKm: Number(distanceKm(lat, lon, s.lat, s.lon).toFixed(2)) }));
+  const metStations = withDist.filter(s => s.temp !== null).sort((a, b) => a.distanceKm - b.distanceKm);
+  const roadStations = withDist.filter(s => s.roadTemp !== null).sort((a, b) => a.distanceKm - b.distanceKm);
+  const bridgeStations = withDist.filter(s => s.roadTemp !== null && s.stationType?.includes('결빙')).sort((a, b) => a.distanceKm - b.distanceKm);
+
+  const primary = metStations[0] || roadStations[0] || withDist.sort((a, b) => a.distanceKm - b.distanceKm)[0];
+  if (!primary) return null;
+  const nearestRoad = roadStations[0] || primary;
+  const nearestBridge = bridgeStations[0] && bridgeStations[0].distanceKm <= 25 ? bridgeStations[0] : null;
+
+  return {
+    name: primary.name,
+    stnId: primary.stnId,
+    routeNo: primary.routeNo || '12',
+    milepostKm: primary.milepostKm ?? null,
+    roadName: primary.roadName || '무안광주대구선',
+    stationType: primary.stationType,
+    elevation: primary.elevation,
+    distanceKm: primary.distanceKm,
+    time: primary.time || nearestRoad.time,
+    temp: primary.temp,
+    humidity: primary.humidity,
+    dayPrecip: primary.dayPrecip,
+    snowDepth: primary.snowDepth,
+    windSpeed: primary.windSpeed,
+    gustSpeed: primary.gustSpeed,
+    visibility: primary.visibility,
+    roadStationName: nearestRoad.name,
+    roadMilepostKm: nearestRoad.milepostKm ?? null,
+    roadDistanceKm: nearestRoad.distanceKm,
+    roadTemp: nearestRoad.roadTemp,
+    surfaceCode: nearestRoad.surfaceCode,
+    surfaceState: nearestRoad.surfaceState,
+    bridgeStationName: nearestBridge ? nearestBridge.name : null,
+    bridgeMilepostKm: nearestBridge ? (nearestBridge.milepostKm ?? null) : null,
+    bridgeDistanceKm: nearestBridge ? nearestBridge.distanceKm : null,
+    bridgeRoadTemp: nearestBridge ? nearestBridge.roadTemp : null,
+    bridgeSurfaceState: nearestBridge ? nearestBridge.surfaceState : null,
+    source: `기상청 도로기상관측망 (고속국도 12호선 광주대구선 · API코드 14)`
+  };
+}
+
+function parseNcstValues(res, grid) {
+  if (!res) return null;
+  const vals = {};
+  for (const o of res.items || []) vals[o.category] = o.obsrValue;
+  const pty = String(vals.PTY || '0');
+  return {
+    name: `기상청 격자(${grid.nx},${grid.ny})`,
+    distanceKm: 0,
+    time: res.base,
+    temp: vals.T1H != null ? Number(vals.T1H) : null,
+    humidity: vals.REH != null ? Number(vals.REH) : null,
+    dayPrecip: vals.RN1 != null ? amountNumber(vals.RN1) : null,
+    windSpeed: vals.WSD != null ? Number(vals.WSD) : null,
+    pty,
+    description: pty !== '0' ? precipType(pty) : null,
+    source: '기상청 초단기실황'
+  };
+}
+
+function mergeObservationResult(roadMatch, kmaNcst) {
+  if (!roadMatch && !kmaNcst) throw new Error('기상청 실황 관측 자료를 불러오지 못했습니다.');
+  return roadMatch ? {
+    ...roadMatch,
+    temp: roadMatch.temp ?? kmaNcst?.temp ?? null,
+    humidity: roadMatch.humidity ?? kmaNcst?.humidity ?? null,
+    dayPrecip: roadMatch.dayPrecip ?? kmaNcst?.dayPrecip ?? 0,
+    windSpeed: roadMatch.windSpeed ?? kmaNcst?.windSpeed ?? null,
+    description: kmaNcst?.description || (roadMatch.surfaceCode >= 4 ? `노면 ${roadMatch.surfaceState}` : null)
+  } : {
+    name: kmaNcst.name,
+    roadName: null,
+    stationType: '격자실황',
+    distanceKm: 0,
+    time: kmaNcst.time,
+    temp: kmaNcst.temp,
+    roadTemp: null,
+    bridgeRoadTemp: null,
+    surfaceCode: null,
+    surfaceState: null,
+    humidity: kmaNcst.humidity,
+    dayPrecip: kmaNcst.dayPrecip ?? 0,
+    snowDepth: null,
+    windSpeed: kmaNcst.windSpeed,
+    gustSpeed: null,
+    visibility: null,
+    description: kmaNcst.description,
+    source: kmaNcst.source
+  };
+}
+
+/**
+ * 기상특보 전종 파싱 및 도로관리 위험도 우선순위 정렬 (요구사항 3)
+ */
+const WARNING_TYPE_PRIORITY = {
+  '태풍': 1,
+  '대설': 2,
+  '호우': 3,
+  '폭풍해일': 4,
+  '지진해일': 5,
+  '한파': 6,
+  '강풍': 7,
+  '안개': 8,
+  '풍랑': 9,
+  '폭염': 10,
+  '건조': 11,
+  '황사': 12,
+  '열대야': 13
+};
+const WARNING_LEVEL_PRIORITY = {
+  '경보': 1,
+  '주의보': 2,
+  '주의': 2,
+  '예비특보': 3,
+  '예비': 3
+};
+
+function normalizeLevel(lvl) {
+  const s = String(lvl || '').trim();
+  if (s.includes('경보') || /warning/i.test(s)) return '경보';
+  if (s.includes('주의') || /advisory|watch/i.test(s)) return '주의보';
+  if (s.includes('예비') || /preliminary/i.test(s)) return '예비특보';
+  return '특보';
+}
+
+function formatKstStamp(raw) {
+  const s = String(raw || '').trim();
+  if (!/^\d{12}$/.test(s)) return s || '미정';
+  const m = Number(s.slice(4, 6));
+  const d = Number(s.slice(6, 8));
+  const hh = s.slice(8, 10);
+  const mm = s.slice(10, 12);
+  const prelimMap = {
+    '0259': '새벽(00~03시)', '0559': '새벽(03~06시)', '0859': '아침(06~09시)',
+    '1159': '오전(09~12시)', '1459': '낮(12~15시)', '1759': '늦은오후(15~18시)',
+    '2059': '저녁(18~21시)', '2359': '밤(21~24시)', '1158': '오전(06~12시)',
+    '1758': '오후(12~18시)', '0558': '새벽(00~06시)', '2358': '밤(18~24시)', '1458': '오후(12~18시)'
+  };
+  if (prelimMap[hh + mm]) return `${pad(m)}-${pad(d)} ${prelimMap[hh + mm]}`;
+  return `${pad(m)}-${pad(d)} ${hh}:${mm}`;
+}
+
+function parseWrnNow(rawText) {
+  const list = [];
+  for (const rawLine of String(rawText || '').split(/\r?\n/)) {
+    const line = rawLine.trim();
+    if (!line || line.startsWith('#')) continue;
+    const parts = line.split(',').map(s => s.trim());
+    if (parts.length < 10) continue;
+    const [regUp, regUpKo, regId, regKo, tmFc, tmEf, wrn, lvl, cmd, edTm] = parts;
+    if (/해제|취소/.test(cmd)) continue;
+    const level = normalizeLevel(lvl);
+    const title = level === '예비특보' ? `${wrn} 예비특보` : `${wrn}${level}`;
+    const typeRank = WARNING_TYPE_PRIORITY[wrn] || 20;
+    const levelRank = WARNING_LEVEL_PRIORITY[level] || 4;
+    const priorityScore = levelRank * 100 + typeRank;
+    const nowKstStr = (() => { const d = kst(); return datePart(d) + timePart(d); })();
+    const isFuture = /^\d{12}$/.test(tmEf) && tmEf > nowKstStr;
+    list.push({
+      regUp,
+      regUpKo,
+      regId,
+      regKo,
+      tmFc,
+      tmEf,
+      kind: wrn,
+      level,
+      title,
+      cmd,
+      announcedText: formatKstStamp(tmFc),
+      effectiveText: formatKstStamp(tmEf),
+      isFutureEffective: isFuture || level === '예비특보',
+      expiresText: edTm ? edTm.replace(/,=$/, '').trim() : '기상청 추후 발표',
+      priorityScore
+    });
+  }
+  return list.sort((a, b) => a.priorityScore - b.priorityScore);
+}
+
+function sortWarnings(warnings) {
+  return [...(warnings || [])].sort((a, b) => (a.priorityScore ?? 999) - (b.priorityScore ?? 999));
+}
+
+function inPolygon(lat, lon, polygon) {
+  const pts = String(polygon || '').trim().split(/\s+/).map(s => s.split(',').map(Number));
+  if (pts.length < 3 || pts.some(p => p.length !== 2 || !p.every(Number.isFinite))) return false;
+  let hit = false;
+  for (let i = 0, j = pts.length - 1; i < pts.length; j = i++) {
+    const [y, x] = pts[i], [yy, xx] = pts[j];
+    if ((y > lat) !== (yy > lat) && lon < (xx - x) * (lat - y) / (yy - y) + x) hit = !hit;
+  }
+  return hit;
+}
+
+function extractCapLinksFromRss(rssXml, limit = 12) {
+  return [...String(rssXml || '').matchAll(/<link>(https?:\/\/[^<]+)<\/link>/g)]
+    .map(m => m[1])
+    .map(u => {
+      const m = u.match(/\/w\/repositary\/xml\/wrn\/xml\/([^/]+\.xml)$/);
+      return m ? m[1].replace(/_EN\.xml$/, '_KR.xml') : null;
+    })
+    .filter(Boolean)
+    .slice(0, limit);
+}
+
+function populateCapPolygons(capXml, polyMap) {
+  const areas = String(capXml || '').match(/<area>[\s\S]*?<\/area>/g) || [];
+  for (const a of areas) {
+    const desc = a.match(/<areaDesc>([^<]+)<\/areaDesc>/)?.[1]?.replace(/\s+/g, '');
+    const polys = [...a.matchAll(/<polygon>([^<]+)<\/polygon>/g)].map(m => m[1]);
+    if (desc && polys.length) {
+      const prev = polyMap.get(desc) || [];
+      polyMap.set(desc, [...prev, ...polys]);
+    }
+  }
+}
+
+function warningMatchesPlace(w, targetName, lat, lon, capPolyMap) {
+  const clean = s => String(s || '').replace(/\s+/g, '');
+  const target = clean(targetName);
+  if (!target) return true;
+  const rKo = clean(w.regKo);
+  const rUp = clean(w.regUpKo);
+  if (rKo === target || (rKo.length >= 2 && target.includes(rKo))) return true;
+
+  const isSubZone = Boolean((rUp && rKo !== rUp) || /(서북|서남|동북|동남|중북|중남|동부|서부|남부|북부|중부|산지|평지)$/.test(rKo));
+  if (isSubZone) {
+    if (Number.isFinite(lat) && Number.isFinite(lon) && capPolyMap?.has(rKo)) {
+      return capPolyMap.get(rKo).some(poly => inPolygon(lat, lon, poly));
+    }
+    const cleanDir = s => s.replace(/군|시|구/g, '');
+    return cleanDir(rKo) === cleanDir(target);
+  }
+
+  if (rKo.includes(target)) return true;
+  const prefix2 = target.slice(0, 2);
+  if (prefix2.length === 2 && ['함양', '거창', '합천', '고령', '남원', '달성'].includes(prefix2)) {
+    return rKo.includes(prefix2) || rUp.includes(prefix2);
+  }
+  return false;
+}
+
+function detectRadarImageType(bytes) {
+  if (!bytes || bytes.length > 6_000_000) throw new Error('레이더 이미지 용량 제한 초과');
+  const isPng = bytes[0] === 0x89 && bytes[1] === 0x50 && bytes[2] === 0x4e && bytes[3] === 0x47;
+  const isGif = bytes[0] === 0x47 && bytes[1] === 0x49 && bytes[2] === 0x46;
+  const isJpg = bytes[0] === 0xff && bytes[1] === 0xd8;
+  if (!isPng && !isGif && !isJpg) throw new Error('레이더 API에서 이미지가 아닌 응답을 받았습니다. API허브 키 권한을 확인하세요.');
+  return isPng ? 'image/png' : isGif ? 'image/gif' : 'image/jpeg';
+}
+
+/**
+ * 3.1.3 도로 위험기상정보 파일 API (road_file_down.php · roadNum=012 무안광주대구선 · 5분 UTC 생산)
+ * 위험수준: 0(정보없음/안개없음) / 1(관심) / 2(주의) / 3(위험)
+ */
+const ROAD_ICE_LABELS = ['정보없음', '관심', '주의', '위험'];
+const ROAD_FOG_LABELS = ['안개없음', '관심', '주의', '위험'];
+
+const CORRIDOR_ANCHOR_STATIONS = [
+  { stnId: '14205', name: '남원주차장(도)', stationType: '기본', km: 50.8, lat: 35.4162, lon: 127.3446 },
+  { stnId: '14407', name: '번암교(도)', stationType: '목표(결빙)', km: 72.9, lat: 35.4748, lon: 127.5443 },
+  { stnId: '14102', name: '지리산휴(도)', stationType: '거점', km: 75.4, lat: 35.4826, lon: 127.5692 },
+  { stnId: '14408', name: '옥계1교(도)', stationType: '목표(결빙)', km: 86.2, lat: 35.5384, lon: 127.6553 },
+  { stnId: '14206', name: '함양(도)', stationType: '기본', km: 95.0, lat: 35.5327, lon: 127.7495 },
+  { stnId: '14409', name: '죽산천교(도)', stationType: '목표(결빙)', km: 102.9, lat: 35.5486, lon: 127.8289 },
+  { stnId: '14207', name: '남상졸음(도)', stationType: '기본', km: 115.3, lat: 35.6366, lon: 127.9066 },
+  { stnId: '14208', name: '거창휴(도)', stationType: '기본', km: 134.1, lat: 35.7074, lon: 128.0541 },
+  { stnId: '14209', name: '양전교(도)', stationType: '기본', km: 158.2, lat: 35.7247, lon: 128.2979 },
+  { stnId: '14103', name: '논공휴(도)', stationType: '거점', km: 169.2, lat: 35.7653, lon: 128.4015 },
+  { stnId: '14410', name: '논공교(도)', stationType: '목표(결빙)', km: 171.3, lat: 35.7681, lon: 128.4230 }
+];
+
+const CORRIDOR_WATCHED_PLACES = [
+  { name: '대구 달성군남부', site: '현풍읍', lat: 35.697, lon: 128.447 },
+  { name: '함양중부', site: '지곡면', lat: 35.566, lon: 127.774 },
+  { name: '거창군남부', site: '남상면', lat: 35.644, lon: 127.910 },
+  { name: '합천군서북부', site: '야로면', lat: 35.706, lon: 128.168 },
+  { name: '고령군', site: '대가야읍', lat: 35.728, lon: 128.263 },
+  { name: '남원', site: '남원시청', lat: 35.416, lon: 127.390 },
+  { name: '함양', site: '함양읍', lat: 35.520, lon: 127.725 },
+  { name: '거창', site: '거창읍', lat: 35.687, lon: 127.910 }
+];
+
+function utcFiveMinSlot(ms = Date.now()) {
+  const d = new Date(ms);
+  const m = Math.floor(d.getUTCMinutes() / 5) * 5;
+  d.setUTCMinutes(m, 0, 0);
+  return {
+    tmUtc: `${d.getUTCFullYear()}${pad(d.getUTCMonth() + 1)}${pad(d.getUTCDate())}${pad(d.getUTCHours())}${pad(d.getUTCMinutes())}`,
+    tmKst: isoKst(kst(d.getTime()))
+  };
+}
+
+async function extractZipTextEntries(bytes, fileFilter = () => true) {
+  if (!bytes || bytes.length < 22) throw new Error('유효한 ZIP 파일이 아닙니다.');
+  const view = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength);
+  let eocd = -1;
+  const minOffset = Math.max(0, bytes.length - 65557);
+  for (let i = bytes.length - 22; i >= minOffset; i--) {
+    if (view.getUint32(i, true) === 0x06054b50) { eocd = i; break; }
+  }
+  if (eocd < 0) throw new Error('ZIP 중앙 디렉터리를 찾지 못했습니다.');
+
+  const totalEntries = view.getUint16(eocd + 10, true);
+  let cdOff = view.getUint32(eocd + 16, true);
+  const decUtf8 = new TextDecoder('utf-8');
+  const out = {};
+
+  for (let k = 0; k < totalEntries && cdOff + 46 <= bytes.length; k++) {
+    if (view.getUint32(cdOff, true) !== 0x02014b50) break;
+    const method = view.getUint16(cdOff + 10, true);
+    const compSize = view.getUint32(cdOff + 20, true);
+    const fnLen = view.getUint16(cdOff + 28, true);
+    const exLen = view.getUint16(cdOff + 30, true);
+    const cmLen = view.getUint16(cdOff + 32, true);
+    const localOff = view.getUint32(cdOff + 42, true);
+    const fileName = decUtf8.decode(bytes.subarray(cdOff + 46, cdOff + 46 + fnLen));
+    cdOff += 46 + fnLen + exLen + cmLen;
+
+    if (!fileFilter(fileName)) continue;
+    if (localOff + 30 > bytes.length) continue;
+    const lFnLen = view.getUint16(localOff + 26, true);
+    const lExLen = view.getUint16(localOff + 28, true);
+    const dataStart = localOff + 30 + lFnLen + lExLen;
+    const compBytes = bytes.subarray(dataStart, dataStart + compSize);
+
+    let plainBytes;
+    if (method === 0) {
+      plainBytes = compBytes;
+    } else if (method === 8) {
+      const ds = new DecompressionStream('deflate-raw');
+      const writer = ds.writable.getWriter();
+      writer.write(compBytes);
+      writer.close();
+      plainBytes = new Uint8Array(await new Response(ds.readable).arrayBuffer());
+    } else {
+      continue;
+    }
+    out[fileName] = decUtf8.decode(plainBytes);
+  }
+  return out;
+}
+
+function parseRoadRiskCsv(csvText) {
+  const lines = String(csvText || '').split(/\r?\n/);
+  if (lines.length < 2) return [];
+  const header = lines[0].trim().split(',');
+  const is1Km = header[1] === 'S_NUM' || header.includes('FLAG');
+  const rows = [];
+  for (let i = 1; i < lines.length; i++) {
+    const line = lines[i].trim();
+    if (!line) continue;
+    const p = line.split(',');
+    let fLon, fLat, tLon, tLat, lv, flag;
+    if (is1Km) {
+      if (p.length < 8) continue;
+      fLon = Number(p[2]); fLat = Number(p[3]); tLon = Number(p[4]); tLat = Number(p[5]);
+      lv = Number(p[6]); flag = Number(p[7]);
+    } else {
+      if (p.length < 8) continue;
+      fLon = Number(p[3]); fLat = Number(p[4]); tLon = Number(p[5]); tLat = Number(p[6]);
+      lv = Number(p[7]); flag = 0;
+    }
+    if (!Number.isFinite(fLat) || !Number.isFinite(fLon) || !Number.isFinite(lv)) continue;
+    const lat = Number.isFinite(tLat) ? (fLat + tLat) / 2 : fLat;
+    const lon = Number.isFinite(tLon) ? (fLon + tLon) / 2 : fLon;
+    rows.push({ lat, lon, level: Math.max(0, Math.min(3, lv)), flag: flag === 1 ? 1 : 0 });
+  }
+  return rows;
+}
+
+function summarizeSegmentWindow(lat, lon, frgRows, fogRows, radiusKm = 2.5) {
+  let maxIce = 0, maxFog = 0, observed = false;
+  const iceCounts = [0, 0, 0, 0];
+  const fogCounts = [0, 0, 0, 0];
+  let nearestDist = Infinity, nearestIce = 0, nearestFog = 0;
+  let segCount = 0;
+
+  // Rough bounding box (~1 deg lat ≈ 111km, lon ≈ 90km) before Haversine keeps loop < 1ms
+  const latDeg = radiusKm / 100;
+  const lonDeg = radiusKm / 80;
+
+  for (let i = 0; i < frgRows.length; i++) {
+    const r = frgRows[i];
+    if (Math.abs(r.lat - lat) > latDeg || Math.abs(r.lon - lon) > lonDeg) continue;
+    const d = distanceKm(lat, lon, r.lat, r.lon);
+    if (d <= radiusKm) {
+      segCount++;
+      iceCounts[r.level] = (iceCounts[r.level] || 0) + 1;
+      if (r.level > maxIce) maxIce = r.level;
+      if (r.flag === 1) observed = true;
+      if (d < nearestDist) { nearestDist = d; nearestIce = r.level; }
+    }
+  }
+  let nearestFogDist = Infinity;
+  for (let i = 0; i < fogRows.length; i++) {
+    const r = fogRows[i];
+    if (Math.abs(r.lat - lat) > latDeg || Math.abs(r.lon - lon) > lonDeg) continue;
+    const d = distanceKm(lat, lon, r.lat, r.lon);
+    if (d <= radiusKm) {
+      fogCounts[r.level] = (fogCounts[r.level] || 0) + 1;
+      if (r.level > maxFog) maxFog = r.level;
+      if (d < nearestFogDist) { nearestFogDist = d; nearestFog = r.level; }
+    }
+  }
+
+  return {
+    segmentCount: segCount,
+    nearestDistKm: Number.isFinite(nearestDist) ? Number(nearestDist.toFixed(2)) : null,
+    nearestIce,
+    nearestFog,
+    iceLevel: maxIce,
+    iceLabel: ROAD_ICE_LABELS[maxIce] || '정보없음',
+    fogLevel: maxFog,
+    fogLabel: ROAD_FOG_LABELS[maxFog] || '안개없음',
+    iceCounts,
+    fogCounts,
+    flagLabel: observed ? '관측' : '분석'
+  };
+}
+
+function matchStationRiskForCoord(lat, lon, stationRisks, frgRows, fogRows, radiusKm = 6) {
+  let bestStn = null, bestDist = Infinity;
+  for (const s of stationRisks || []) {
+    const d = distanceKm(lat, lon, s.lat, s.lon);
+    if (d < bestDist) { bestDist = d; bestStn = s; }
+  }
+  const localWin = frgRows?.length
+    ? summarizeSegmentWindow(lat, lon, frgRows, fogRows, radiusKm)
+    : { segmentCount: 0, iceLevel: 0, fogLevel: 0, iceCounts: [0, 0, 0, 0], fogCounts: [0, 0, 0, 0], flagLabel: '분석' };
+
+  const iceLevel = Math.max(localWin.iceLevel || 0, bestStn?.iceLevel || 0);
+  const fogLevel = Math.max(localWin.fogLevel || 0, bestStn?.fogLevel || 0);
+  return {
+    stationId: bestStn?.stnId || null,
+    stationName: bestStn?.name || null,
+    stationKm: bestStn?.km ?? null,
+    stationType: bestStn?.stationType || null,
+    stationDistanceKm: Number.isFinite(bestDist) ? Number(bestDist.toFixed(2)) : null,
+    stationIceLevel: bestStn?.iceLevel ?? 0,
+    stationIceLabel: ROAD_ICE_LABELS[bestStn?.iceLevel ?? 0],
+    stationFogLevel: bestStn?.fogLevel ?? 0,
+    stationFogLabel: ROAD_FOG_LABELS[bestStn?.fogLevel ?? 0],
+    iceLevel,
+    iceLabel: ROAD_ICE_LABELS[iceLevel] || '정보없음',
+    fogLevel,
+    fogLabel: ROAD_FOG_LABELS[fogLevel] || '안개없음',
+    segmentCount: localWin.segmentCount || bestStn?.segmentCount || 0,
+    iceCounts: localWin.iceCounts,
+    fogCounts: localWin.fogCounts,
+    flagLabel: localWin.flagLabel === '관측' || bestStn?.flagLabel === '관측' ? '관측' : '분석'
+  };
+}
+
+function buildRoadRiskPayload({ roadNum = '012', tmUtc, tmKst, frgRows = [], fogRows = [] }) {
+  const iceCounts = [0, 0, 0, 0];
+  const fogCounts = [0, 0, 0, 0];
+  const branchIceCounts = [0, 0, 0, 0];
+  const branchFogCounts = [0, 0, 0, 0];
+  let maxIce = 0, maxFog = 0, observedCount = 0;
+  let branchMaxIce = 0, branchMaxFog = 0, branchTotal = 0;
+  // 고령지사 관할 구간: 함양IC(133.2km, 127.72E) ~ 고령JC(213.4km, 128.45E)
+  const inBranch = r => r.lon >= 127.71 && r.lon <= 128.45 && r.lat >= 35.48 && r.lat <= 35.80;
+
+  for (const r of frgRows) {
+    iceCounts[r.level] = (iceCounts[r.level] || 0) + 1;
+    if (r.level > maxIce) maxIce = r.level;
+    if (r.flag === 1) observedCount++;
+    if (inBranch(r)) {
+      branchTotal++;
+      branchIceCounts[r.level] = (branchIceCounts[r.level] || 0) + 1;
+      if (r.level > branchMaxIce) branchMaxIce = r.level;
+    }
+  }
+  for (const r of fogRows) {
+    fogCounts[r.level] = (fogCounts[r.level] || 0) + 1;
+    if (r.level > maxFog) maxFog = r.level;
+    if (inBranch(r)) {
+      branchFogCounts[r.level] = (branchFogCounts[r.level] || 0) + 1;
+      if (r.level > branchMaxFog) branchMaxFog = r.level;
+    }
+  }
+
+  const stationRisks = CORRIDOR_ANCHOR_STATIONS.map(stn => {
+    const win = summarizeSegmentWindow(stn.lat, stn.lon, frgRows, fogRows, 2.5);
+    return {
+      stnId: stn.stnId,
+      name: stn.name,
+      stationType: stn.stationType,
+      km: stn.km,
+      lat: stn.lat,
+      lon: stn.lon,
+      ...win
+    };
+  });
+
+  const placeRisks = {};
+  for (const p of CORRIDOR_WATCHED_PLACES) {
+    const key = `${p.lat.toFixed(3)},${p.lon.toFixed(3)}`;
+    placeRisks[key] = {
+      name: p.name,
+      site: p.site,
+      ...matchStationRiskForCoord(p.lat, p.lon, stationRisks, frgRows, fogRows, 6)
+    };
+  }
+
+  return {
+    ok: true,
+    roadNum: String(roadNum).padStart(3, '0'),
+    tmUtc,
+    tmKst,
+    updatedAt: new Date().toISOString(),
+    corridorSummary: {
+      total1km: frgRows.length,
+      observedCount,
+      maxIce,
+      iceLabel: ROAD_ICE_LABELS[maxIce] || '정보없음',
+      iceCounts,
+      maxFog,
+      fogLabel: ROAD_FOG_LABELS[maxFog] || '안개없음',
+      fogCounts
+    },
+    branchSummary: {
+      rangeLabel: '함양IC(133.2k)~고령JC(213.4k)',
+      total1km: branchTotal,
+      maxIce: branchMaxIce,
+      iceLabel: ROAD_ICE_LABELS[branchMaxIce] || '정보없음',
+      iceCounts: branchIceCounts,
+      maxFog: branchMaxFog,
+      fogLabel: ROAD_FOG_LABELS[branchMaxFog] || '안개없음',
+      fogCounts: branchFogCounts
+    },
+    stationRisks,
+    placeRisks
+  };
+}
+
+/**
+ * 12개 읍·면·동 통합 1시간 단기예보 모니터 (고령지사 관내·고속국도 12호선 연계)
+ * - 기상청 날씨누리(weather.go.kr/w/rest/zone/dong.do) 공식 읍면동 대표 좌표 및 DFS 격자(nx, ny) 일치
+ *   ※ 거창읍·남하면은 공식 KMA 격자 (77, 86)를 공유 → API 호출은 고유 11격자만 수행해 중복 호출 제거
+ * - "경상목도 고령군 대가야면" 표기는 공식 행정명 "경상북도 고령군 대가야읍"으로 정정
+ */
+const SHORT_TERM_12_REGIONS = [
+  { id: 'ssangnim', admin: '경북', county: '고령군', name: '쌍림면', group: '고령', color: '#4c84e8', routeOrder: 9, lat: 35.6768, lon: 128.2441 },
+  { id: 'seongsan', admin: '경북', county: '고령군', name: '성산면', group: '고령', color: '#4c84e8', routeOrder: 11, lat: 35.7469, lon: 128.3621 },
+  { id: 'daegaya', admin: '경북', county: '고령군', name: '대가야읍', group: '고령', color: '#4c84e8', routeOrder: 10, lat: 35.7305, lon: 128.2679 },
+  { id: 'yaro', admin: '경남', county: '합천군', name: '야로면', group: '합천', color: '#9c6ade', routeOrder: 8, lat: 35.7022, lon: 128.1699 },
+  { id: 'geochang', admin: '경남', county: '거창군', name: '거창읍', group: '거창', color: '#d98a36', routeOrder: 4, lat: 35.6849, lon: 127.9060 },
+  { id: 'namha', admin: '경남', county: '거창군', name: '남하면', group: '거창', color: '#d98a36', routeOrder: 6, lat: 35.6647, lon: 127.9458 },
+  { id: 'namsang', admin: '경남', county: '거창군', name: '남상면', group: '거창', color: '#d98a36', routeOrder: 5, lat: 35.6402, lon: 127.9122 },
+  { id: 'gajo', admin: '경남', county: '거창군', name: '가조면', group: '거창', color: '#d98a36', routeOrder: 7, lat: 35.7080, lon: 128.0169 },
+  { id: 'sudong', admin: '경남', county: '함양군', name: '수동면', group: '함양', color: '#2ea87e', routeOrder: 3, lat: 35.5191, lon: 127.7899 },
+  { id: 'jigok', admin: '경남', county: '함양군', name: '지곡면', group: '함양', color: '#2ea87e', routeOrder: 2, lat: 35.5632, lon: 127.7764 },
+  { id: 'hamyang', admin: '경남', county: '함양군', name: '함양읍', group: '함양', color: '#2ea87e', routeOrder: 1, lat: 35.5166, lon: 127.7288 },
+  { id: 'okpo', admin: '대구', county: '달성군', name: '옥포읍', group: '달성', color: '#c47b50', routeOrder: 12, lat: 35.7866, lon: 128.4660 }
+].map(r => ({ ...r, grid: latlonToGrid(r.lat, r.lon) }));
+
+function summarizeHourlyWindow(hours = []) {
+  let wetHours = 0, firstWetTime = null;
+  let freezingHours = 0, firstFreezingTime = null;
+  let overlapHours = 0, firstOverlapTime = null;
+  let minTemp = null, maxTemp = null, maxPop = 0, totalRainMm = 0, maxSnowCm = 0, maxWind = 0;
+
+  for (const h of hours) {
+    const t = h.temp != null && Number.isFinite(Number(h.temp)) ? Number(h.temp) : null;
+    const pop = h.pop != null && Number.isFinite(Number(h.pop)) ? Number(h.pop) : 0;
+    const isWet = !!h.wet;
+    const isSubzero = t !== null && t < 0;
+
+    if (isWet) {
+      wetHours++;
+      if (!firstWetTime) firstWetTime = h.time;
+    }
+    if (isSubzero) {
+      freezingHours++;
+      if (!firstFreezingTime) firstFreezingTime = h.time;
+    }
+    if (isWet && isSubzero) {
+      overlapHours++;
+      if (!firstOverlapTime) firstOverlapTime = h.time;
+    }
+    if (t !== null) {
+      minTemp = minTemp === null ? t : Math.min(minTemp, t);
+      maxTemp = maxTemp === null ? t : Math.max(maxTemp, t);
+    }
+    if (pop > maxPop) maxPop = pop;
+    if (Number.isFinite(h.rainMm)) totalRainMm += h.rainMm;
+    if (Number.isFinite(h.snowCm) && h.snowCm > maxSnowCm) maxSnowCm = h.snowCm;
+    if (Number.isFinite(h.wind) && h.wind > maxWind) maxWind = h.wind;
+  }
+
+  return {
+    hoursCount: hours.length,
+    wetHours,
+    firstWetTime,
+    freezingHours,
+    firstFreezingTime,
+    overlapHours,
+    firstOverlapTime,
+    minTemp,
+    maxTemp,
+    maxPop,
+    totalRainMm: Math.round(totalRainMm * 10) / 10,
+    maxSnowCm: Math.round(maxSnowCm * 10) / 10,
+    maxWind: Math.round(maxWind * 10) / 10
+  };
+}
+
+function buildShortTermRegionForecast({ region, now = Date.now(), shortRes = null, ultraRes = null }) {
+  const near = grouped(ultraRes?.items);
+  const far = grouped(shortRes?.items);
+  const nowK = kst(now);
+  nowK.setUTCMinutes(0, 0, 0);
+  const todayDayNum = nowK.getUTCDate();
+
+  // 초단기예보(+1h~+6h)가 이미 다음 정각(+1h)을 시작 시각으로 제공하면 기상청 단기예보 페이지처럼 그 시각부터 시작해
+  // 지나간 현재 정각의 구형 단기예보(02시 등)와 초단기예보 사이의 인위적 기온/하늘 단차를 방지한다.
+  const nextHourKey = datePart(new Date(nowK.getTime() + 3600000)) + timePart(new Date(nowK.getTime() + 3600000));
+  const nowHourKey = datePart(nowK) + timePart(nowK);
+  const startK = (!near.has(nowHourKey) && near.has(nextHourKey))
+    ? new Date(nowK.getTime() + 3600000)
+    : nowK;
+
+  // 시작 시각 ~ 내일 23:00 KST 범위 (최소 24시간, 최대 48시간)
+  const targetHours = Math.max(24, Math.min(48, (24 - startK.getUTCHours()) + 24));
+  const hours = [];
+
+  for (let i = 0; i < targetHours; i++) {
+    const d = new Date(startK.getTime() + i * 3600000);
+    const key = datePart(d) + timePart(d);
+    const sourceNear = near.get(key);
+    const sourceFar = far.get(key);
+    if (!sourceNear && !sourceFar) continue;
+    const combined = { ...(sourceFar || {}), ...(sourceNear || {}), __source: sourceNear ? '초단기+단기' : '단기예보' };
+    const c = classify(combined);
+    const hKst = d.getUTCHours();
+    const dNum = d.getUTCDate();
+    hours.push({
+      offset: hours.length,
+      time: isoKst(d),
+      dateLabel: `${pad(d.getUTCMonth() + 1)}-${pad(dNum)}`,
+      dayNum: dNum,
+      isTomorrow: dNum !== todayDayNum,
+      hourKst: hKst,
+      isNight: hKst >= 18 || hKst < 6,
+      temp: c.temp != null && Number.isFinite(Number(c.temp)) ? Number(c.temp) : null,
+      humidity: c.humidity != null && Number.isFinite(Number(c.humidity)) ? Number(c.humidity) : null,
+      pop: c.chance,
+      pty: c.pty,
+      sky: c.sky,
+      skyLabel: c.skyLabel,
+      type: c.type,
+      wet: c.wet,
+      rainMm: c.rainMm,
+      snowCm: c.snowCm,
+      amount: c.amount,
+      snow: c.snow,
+      wind: c.wind,
+      vec: c.vec,
+      windDir: c.windDir,
+      source: c.source
+    });
+  }
+
+  return {
+    id: region.id,
+    admin: region.admin,
+    county: region.county,
+    name: region.name,
+    group: region.group,
+    color: region.color,
+    routeOrder: region.routeOrder,
+    lat: region.lat,
+    lon: region.lon,
+    grid: region.grid,
+    sources: {
+      short: shortRes?.base || null,
+      ultra: ultraRes?.base || null
+    },
+    hours,
+    summaries: {
+      h6: summarizeHourlyWindow(hours.slice(0, 6)),
+      h12: summarizeHourlyWindow(hours.slice(0, 12)),
+      h24: summarizeHourlyWindow(hours.slice(0, 24)),
+      tomorrow: summarizeHourlyWindow(hours)
+    }
+  };
+}
+
+function buildShortTerm12Payload({ now = Date.now(), regionResults = [] }) {
+  const gridGroups = new Map();
+  for (const r of regionResults) {
+    const gk = `${r.grid.nx},${r.grid.ny}`;
+    if (!gridGroups.has(gk)) gridGroups.set(gk, []);
+    gridGroups.get(gk).push(`${r.county} ${r.name}`);
+  }
+  const regions = regionResults.map(r => {
+    const gk = `${r.grid.nx},${r.grid.ny}`;
+    const peers = (gridGroups.get(gk) || []).filter(n => n !== `${r.county} ${r.name}`);
+    return { ...r, sharedGridRegions: peers };
+  });
+
+  const kpiFor = (key) => {
+    let wetRegions = 0, freezingRegions = 0, overlapRegions = 0;
+    let earliestWetTime = null, earliestFreezingTime = null, earliestOverlapTime = null;
+    let minTemp = null;
+    for (const r of regions) {
+      const s = r.summaries?.[key];
+      if (!s) continue;
+      if (s.wetHours > 0) {
+        wetRegions++;
+        if (!earliestWetTime || (s.firstWetTime && s.firstWetTime < earliestWetTime)) earliestWetTime = s.firstWetTime;
+      }
+      if (s.freezingHours > 0) {
+        freezingRegions++;
+        if (!earliestFreezingTime || (s.firstFreezingTime && s.firstFreezingTime < earliestFreezingTime)) earliestFreezingTime = s.firstFreezingTime;
+      }
+      if (s.overlapHours > 0) {
+        overlapRegions++;
+        if (!earliestOverlapTime || (s.firstOverlapTime && s.firstOverlapTime < earliestOverlapTime)) earliestOverlapTime = s.firstOverlapTime;
+      }
+      if (s.minTemp !== null) minTemp = minTemp === null ? s.minTemp : Math.min(minTemp, s.minTemp);
+    }
+    return {
+      wetRegions,
+      freezingRegions,
+      overlapRegions,
+      earliestWetTime,
+      earliestFreezingTime,
+      earliestOverlapTime,
+      minTemp
+    };
+  };
+
+  const firstShort = regions.find(r => r.sources?.short)?.sources?.short || null;
+  const firstUltra = regions.find(r => r.sources?.ultra)?.sources?.ultra || null;
+
+  return {
+    ok: true,
+    mode: 'short-term-12',
+    updatedAt: new Date(now).toISOString(),
+    uniqueGridCount: gridGroups.size,
+    sources: { shortBase: firstShort, ultraBase: firstUltra },
+    windowKPIs: {
+      h6: kpiFor('h6'),
+      h12: kpiFor('h12'),
+      h24: kpiFor('h24'),
+      tomorrow: kpiFor('tomorrow')
+    },
+    regions
+  };
+}
+
+async function collectShortTerm12({ now = Date.now(), fetchShort, fetchUltra }) {
+  // 12개 읍·면·동을 고유 격자(nx, ny) 기준으로 중복 제거(거창읍·남하면 공유 → 11개 고유 격자)해 KMA 호출량을 최소화
+  const uniqueGrids = new Map();
+  for (const r of SHORT_TERM_12_REGIONS) {
+    const gk = `${r.grid.nx},${r.grid.ny}`;
+    if (!uniqueGrids.has(gk)) uniqueGrids.set(gk, r.grid);
+  }
+  const gridEntries = [...uniqueGrids.entries()];
+  const gridData = new Map();
+  const chunkSize = 6;
+  for (let idx = 0; idx < gridEntries.length; idx += chunkSize) {
+    const batch = gridEntries.slice(idx, idx + chunkSize);
+    const settled = await Promise.allSettled(
+      batch.map(async ([gk, grid]) => {
+        const [shortSettled, ultraSettled] = await Promise.allSettled([
+          fetchShort(grid),
+          fetchUltra ? fetchUltra(grid) : Promise.resolve(null)
+        ]);
+        const shortRes = shortSettled.status === 'fulfilled' ? shortSettled.value : null;
+        const ultraRes = ultraSettled.status === 'fulfilled' ? ultraSettled.value : null;
+        if (!shortRes && !ultraRes) {
+          throw shortSettled.reason || new Error(`격자(${gk}) 단기예보 조회 실패`);
+        }
+        return { gk, shortRes, ultraRes };
+      })
+    );
+    for (let j = 0; j < settled.length; j++) {
+      const [gk] = batch[j];
+      if (settled[j].status === 'fulfilled') {
+        gridData.set(gk, settled[j].value);
+      } else {
+        gridData.set(gk, { gk, shortRes: null, ultraRes: null });
+      }
+    }
+  }
+
+  const results = SHORT_TERM_12_REGIONS.map((region) => {
+    const gk = `${region.grid.nx},${region.grid.ny}`;
+    const entry = gridData.get(gk) || { shortRes: null, ultraRes: null };
+    return buildShortTermRegionForecast({ region, now, shortRes: entry.shortRes, ultraRes: entry.ultraRes });
+  });
+  if (!results.some(r => r.hours.length > 0)) {
+    throw new Error('12개 지역 기상청 단기예보를 불러오지 못했습니다. API 키 승인 상태를 확인하세요.');
+  }
+  return buildShortTerm12Payload({ now, regionResults: results });
+}
+
+
+/**
+ * 비온다? × 날씨봇 — Cloudflare Workers 무료 티어(24시간 무슬립·일 10만 요청) API 프록시
+ * - 비밀 인증키(KMA_SERVICE_KEY 등)는 Cloudflare Workers Secrets(환경변수)에만 보관합니다.
+ * - GitHub Pages(poeticecho.github.io) 프론트엔드에서 CORS로 직접 호출해 5분 실시간 갱신을 수행합니다.
+ */
+const SHARED_CACHE = new Map();
+const INFLIGHT = new Map();
+const REQUESTS = new Map();
+
+function getCached(key) {
+  const item = SHARED_CACHE.get(key);
+  return item && item.expires > Date.now() ? item.value : null;
+}
+
+function setCached(key, value, ms) {
+  if (SHARED_CACHE.size > 400) {
+    for (const [k, v] of SHARED_CACHE) if (v.expires <= Date.now()) SHARED_CACHE.delete(k);
+    if (SHARED_CACHE.size > 400) SHARED_CACHE.delete(SHARED_CACHE.keys().next().value);
+  }
+  SHARED_CACHE.set(key, { value, expires: Date.now() + ms });
+}
+
+function withInFlight(key, loader) {
+  if (INFLIGHT.has(key)) return INFLIGHT.get(key);
+  const p = Promise.resolve().then(loader).finally(() => {
+    INFLIGHT.delete(key);
+  });
+  INFLIGHT.set(key, p);
+  return p;
+}
+
+function allow(ip) {
+  const now = Date.now();
+  const hit = REQUESTS.get(ip) || { t: now, n: 0 };
+  if (now - hit.t > 60000) { hit.n = 0; hit.t = now; }
+  hit.n++;
+  REQUESTS.set(ip, hit);
+  if (REQUESTS.size > 5000) REQUESTS.clear();
+  return hit.n <= 240;
+}
+
+function buildCorsHeaders(request, env = {}) {
+  const headers = new Headers();
+  const allowList = String(env.CORS_ORIGINS || '')
+    .split(',')
+    .map(s => s.trim())
+    .filter(Boolean);
+  const reqOrigin = request.headers.get('Origin');
+  if (!allowList.length) {
+    headers.set('Access-Control-Allow-Origin', '*');
+  } else if (reqOrigin && allowList.includes(reqOrigin)) {
+    headers.set('Access-Control-Allow-Origin', reqOrigin);
+    headers.set('Vary', 'Origin');
+  }
+  headers.set('Access-Control-Allow-Methods', 'GET, HEAD, OPTIONS');
+  headers.set('Access-Control-Allow-Headers', 'Content-Type');
+  headers.set('Access-Control-Max-Age', '600');
+  headers.set('X-Content-Type-Options', 'nosniff');
+  headers.set('Referrer-Policy', 'no-referrer-when-downgrade');
+  return headers;
+}
+
+function jsonResponse(request, env, status, payload, extraHeaders = {}) {
+  const headers = buildCorsHeaders(request, env);
+  headers.set('Content-Type', 'application/json; charset=utf-8');
+  headers.set('Cache-Control', 'no-store');
+  for (const [k, v] of Object.entries(extraHeaders)) headers.set(k, v);
+  return new Response(request.method === 'HEAD' ? null : JSON.stringify(payload), { status, headers });
+}
+
+function edgeCacheRequest(urlObj, stripT = false) {
+  const u = new URL('https://bionda-edge-cache.internal' + urlObj.pathname + urlObj.search);
+  if (stripT) u.searchParams.delete('t');
+  return new Request(u.toString(), { method: 'GET' });
+}
+
+async function matchEdgeCache(request, env, cacheKeyReq) {
+  try {
+    const cache = globalThis.caches?.default;
+    if (!cache) return null;
+    const hit = await cache.match(cacheKeyReq);
+    if (!hit) return null;
+    const headers = new Headers(hit.headers);
+    const cors = buildCorsHeaders(request, env);
+    cors.forEach((v, k) => headers.set(k, v));
+    return new Response(request.method === 'HEAD' ? null : hit.body, { status: hit.status, headers });
+  } catch {
+    return null;
+  }
+}
+
+function putEdgeCache(ctx, cacheKeyReq, response) {
+  try {
+    const cache = globalThis.caches?.default;
+    if (!cache || response.status !== 200) return;
+    const promise = cache.put(cacheKeyReq, response.clone());
+    if (ctx && typeof ctx.waitUntil === 'function') {
+      ctx.waitUntil(promise.catch(() => {}));
+    }
+  } catch {}
+}
+
+async function fetchWithTimeout(url, options = {}, ms = 10000) {
+  const signal = typeof AbortSignal !== 'undefined' && typeof AbortSignal.timeout === 'function'
+    ? AbortSignal.timeout(ms)
+    : undefined;
+  return fetch(url, signal ? { ...options, signal } : options);
+}
+
+async function fetchKmaFromBase(baseUrl, resource, grid, base, rawKey, timeout = 7500) {
+  const u = new URL(baseUrl + resource);
+  const cleanKey = deEncodedKey(rawKey);
+  u.searchParams.set('serviceKey', cleanKey);
+  if (baseUrl.includes('apihub.kma.go.kr')) {
+    u.searchParams.set('authKey', cleanKey);
+  }
+  u.searchParams.set('numOfRows', resource === 'getVilageFcst' ? '1000' : '800');
+  u.searchParams.set('pageNo', '1');
+  u.searchParams.set('dataType', 'JSON');
+  u.searchParams.set('base_date', datePart(base));
+  u.searchParams.set('base_time', timePart(base));
+  u.searchParams.set('nx', String(grid.nx));
+  u.searchParams.set('ny', String(grid.ny));
+  const r = await fetchWithTimeout(u.toString(), { headers: { Accept: 'application/json' } }, timeout);
+  if (!r.ok) throw new Error(`기상청 응답 오류 HTTP ${r.status}`);
+  return parseKmaForecastJson(await r.text());
+}
+
+async function fetchKma(env, resource, grid, base, timeout = 5000) {
+  const apiKey = getServiceKey(env);
+  if (!apiKey) throw new Error('KMA_SERVICE_KEY 미설정');
+  const cacheKey = `kma|${resource}|${grid.nx}|${grid.ny}|${datePart(base)}|${timePart(base)}`;
+  const hit = getCached(cacheKey);
+  if (hit) return hit;
+
+  return withInFlight(cacheKey, async () => {
+    const isApiHubKey = /^[A-Za-z0-9_-]{20,26}$/.test(apiKey.trim()) && !apiKey.includes('dummy');
+    const bases = isApiHubKey
+      ? [APIHUB_FCST_BASE, DATA_GO_KR_BASE]
+      : [DATA_GO_KR_BASE, APIHUB_FCST_BASE];
+
+    let lastErr;
+    for (const baseUrl of bases) {
+      try {
+        const items = await fetchKmaFromBase(baseUrl, resource, grid, base, apiKey, timeout);
+        const ttlMs = resource === 'getVilageFcst' ? 45 * 60000 : 5 * 60000;
+        setCached(cacheKey, items, ttlMs);
+        return items;
+      } catch (e) {
+        lastErr = e;
+        console.warn('[fetchKma]', resource, baseUrl.includes('apihub') ? 'apihub' : 'data.go.kr', grid.nx, grid.ny, errMessage(e));
+      }
+    }
+    throw lastErr;
+  });
+}
+
+async function fetchWithFallback(env, resource, grid, base, prevMinutes) {
+  try {
+    return { items: await fetchKma(env, resource, grid, base), base: isoKst(base) };
+  } catch (error) {
+    const previous = new Date(base.getTime() - prevMinutes * 60000);
+    try {
+      return {
+        items: await fetchKma(env, resource, grid, previous),
+        base: isoKst(previous),
+        notice: '최신 발표분을 가져오지 못해 직전 발표분 사용'
+      };
+    } catch {
+      throw error;
+    }
+  }
+}
+
+async function forecast(env, lat, lon) {
+  const grid = latlonToGrid(lat, lon);
+  if (grid.nx < 1 || grid.nx > 149 || grid.ny < 1 || grid.ny > 253) {
+    throw new Error('기상청 예보격자 범위를 벗어난 좌표입니다.');
+  }
+  const now = Date.now();
+  const requests = await Promise.allSettled([
+    fetchWithFallback(env, 'getUltraSrtFcst', grid, baseUltra(now), 60),
+    fetchWithFallback(env, 'getVilageFcst', grid, baseShort(now), 180),
+    fetchWithFallback(env, 'getUltraSrtNcst', grid, baseObservation(now), 60)
+  ]);
+  return buildForecastResult(grid, now, requests);
+}
+
+async function fetchShortTerm12(env, force = false) {
+  const apiKey = getServiceKey(env);
+  if (!apiKey) throw new Error('KMA_SERVICE_KEY 미설정');
+  const now = Date.now();
+  const sBase = baseShort(now);
+  const uBase = baseUltra(now);
+  const cacheKey = `short12|${datePart(sBase)}|${timePart(sBase)}|${timePart(uBase)}`;
+  const hit = !force ? getCached(cacheKey) : null;
+  if (hit) return hit;
+
+  return withInFlight(force ? `${cacheKey}|force` : cacheKey, async () => {
+    let resolvedUBase = null;
+    let probePromise = null;
+    const fetchUltraSmart = async (grid) => {
+      if (!resolvedUBase) {
+        if (!probePromise) {
+          probePromise = fetchWithFallback(env, 'getUltraSrtFcst', grid, uBase, 60).then(res => {
+            resolvedUBase = res.notice ? new Date(uBase.getTime() - 60 * 60000) : uBase;
+            return { firstKey: `${grid.nx},${grid.ny}`, res };
+          });
+        }
+        const probed = await probePromise;
+        if (probed.firstKey === `${grid.nx},${grid.ny}`) return probed.res;
+      }
+      const activeBase = resolvedUBase || uBase;
+      return { items: await fetchKma(env, 'getUltraSrtFcst', grid, activeBase, 6000), base: isoKst(activeBase) };
+    };
+
+    const payload = await collectShortTerm12({
+      now,
+      fetchShort: (grid) => fetchWithFallback(env, 'getVilageFcst', grid, sBase, 180),
+      fetchUltra: fetchUltraSmart
+    });
+    setCached(cacheKey, payload, 5 * 60000);
+    return payload;
+  });
+}
+
+async function fetchRoadStations(env, line = getRoadLineCode(env)) {
+  const key = getRoadKey(env);
+  if (!key) throw new Error('KMA_ROAD_KEY 또는 KMA_SERVICE_KEY 미설정');
+  const cacheKey = `road-obs|${line}`;
+  const staleKey = `road-obs-last-good|${line}`;
+  const hit = getCached(cacheKey);
+  if (hit) return hit;
+
+  return withInFlight(cacheKey, async () => {
+    const now = Date.now();
+    const offsetsMinutes = [2, 5, 9];
+    let lastStations = [];
+    for (const off of offsetsMinutes) {
+      try {
+        const d = kst(now - off * 60000);
+        const tm1 = datePart(d) + timePart(d);
+        const u = new URL('https://apihub.kma.go.kr/api/typ01/url/road_stn_obs.php');
+        u.searchParams.set('mode', '2');
+        u.searchParams.set('tm1', tm1);
+        u.searchParams.set('var', String(line));
+        u.searchParams.set('disp', '1');
+        u.searchParams.set('help', '2');
+        u.searchParams.set('authKey', deEncodedKey(key));
+        const r = await fetchWithTimeout(u.toString(), {}, 5000);
+        if (!r.ok) {
+          console.warn('[fetchRoadStations] HTTP', r.status, tm1);
+          continue;
+        }
+        const bytes = new Uint8Array(await r.arrayBuffer());
+        const text = new TextDecoder('euc-kr').decode(bytes);
+        const parsed = parseRoadStations(text);
+        if (parsed.length) {
+          lastStations = parsed;
+          if (parsed.some(s => s.temp !== null || s.roadTemp !== null)) {
+            const result = { ok: true, line: String(line), tm1, updatedAt: new Date().toISOString(), stations: parsed };
+            setCached(cacheKey, result, 2 * 60000);
+            setCached(staleKey, result, 20 * 60000);
+            return result;
+          }
+        }
+      } catch (e) {
+        console.warn('[fetchRoadStations] err off=' + off, errMessage(e));
+      }
+    }
+    if (lastStations.length) {
+      const result = { ok: true, line: String(line), updatedAt: new Date().toISOString(), stations: lastStations };
+      setCached(cacheKey, result, 60000);
+      return result;
+    }
+    const stale = getCached(staleKey);
+    if (stale) return stale;
+    throw new Error('도로기상관측 자료를 가져오지 못했습니다.');
+  });
+}
+
+async function fetchRoadRisk(env, roadNum = '012') {
+  const key = getRoadKey(env);
+  if (!key) throw new Error('KMA_ROAD_KEY 또는 KMA_SERVICE_KEY 미설정');
+  const cleanNum = String(roadNum || '012').replace(/\D/g, '').padStart(3, '0').slice(-3);
+  const cacheKey = `road-risk|${cleanNum}`;
+  const staleKey = `road-risk-last-good|${cleanNum}`;
+  const hit = getCached(cacheKey);
+  if (hit) return hit;
+
+  return withInFlight(cacheKey, async () => {
+    const now = Date.now();
+    const offsetsMinutes = [5, 10, 15, 20];
+    for (const off of offsetsMinutes) {
+      try {
+        const { tmUtc, tmKst } = utcFiveMinSlot(now - off * 60000);
+        const u = new URL('https://apihub.kma.go.kr/api/typ04/url/road_file_down.php');
+        u.searchParams.set('tm', tmUtc);
+        u.searchParams.set('roadNum', cleanNum);
+        u.searchParams.set('authKey', deEncodedKey(key));
+        const r = await fetchWithTimeout(u.toString(), {}, 6500);
+        if (!r.ok) continue;
+        const bytes = new Uint8Array(await r.arrayBuffer());
+        if (bytes.length < 22 || bytes[0] !== 0x50 || bytes[1] !== 0x4b) continue;
+        const files = await extractZipTextEntries(bytes, fn => /_(1KM)_(FRG|FOG)_/i.test(fn));
+        const frgEntry = Object.entries(files).find(([k]) => /_FRG_/i.test(k));
+        const fogEntry = Object.entries(files).find(([k]) => /_FOG_/i.test(k));
+        if (!frgEntry && !fogEntry) continue;
+        const frgRows = frgEntry ? parseRoadRiskCsv(frgEntry[1]) : [];
+        const fogRows = fogEntry ? parseRoadRiskCsv(fogEntry[1]) : [];
+        if (!frgRows.length && !fogRows.length) continue;
+        const payload = buildRoadRiskPayload({ roadNum: cleanNum, tmUtc, tmKst, frgRows, fogRows });
+        setCached(cacheKey, payload, 9 * 60000);
+        setCached(staleKey, payload, 25 * 60000);
+        return payload;
+      } catch (e) {
+        console.warn('[fetchRoadRisk] err off=' + off, errMessage(e));
+      }
+    }
+    const stale = getCached(staleKey);
+    if (stale) return stale;
+    throw new Error('도로 위험기상정보(FRG/FOG) ZIP 자료를 가져오지 못했습니다.');
+  });
+}
+
+async function getObservationForPlace(env, lat, lon) {
+  const cacheKey = `obs|${lat.toFixed(3)}|${lon.toFixed(3)}`;
+  const hit = getCached(cacheKey);
+  if (hit) return hit;
+
+  let roadMatch = null;
+  try {
+    const roadData = await fetchRoadStations(env, getRoadLineCode(env));
+    const m = matchRoadStation(lat, lon, roadData.stations);
+    if (m && m.distanceKm <= 28) roadMatch = m;
+  } catch {}
+
+  let kmaNcst = null;
+  const needsNcstFallback = !roadMatch || roadMatch.temp === null || roadMatch.humidity === null;
+  try {
+    const grid = latlonToGrid(lat, lon);
+    const ncstBase = baseObservation(Date.now());
+    const cachedNcstItems = getCached(`kma|getUltraSrtNcst|${grid.nx}|${grid.ny}|${datePart(ncstBase)}|${timePart(ncstBase)}`);
+    const res = cachedNcstItems
+      ? { items: cachedNcstItems, base: isoKst(ncstBase) }
+      : needsNcstFallback
+        ? await fetchWithFallback(env, 'getUltraSrtNcst', grid, ncstBase, 60)
+        : null;
+    kmaNcst = parseNcstValues(res, grid);
+  } catch {}
+
+  const out = mergeObservationResult(roadMatch, kmaNcst);
+  setCached(cacheKey, out, 90000);
+  return out;
+}
+
+async function fetchWrnNowList(env) {
+  const key = getServiceKey(env);
+  if (!key) return [];
+  const cacheKey = 'kma-wrn-now';
+  const hit = getCached(cacheKey);
+  if (hit) return hit;
+  return withInFlight(cacheKey, async () => {
+    const u = new URL('https://apihub.kma.go.kr/api/typ01/url/wrn_now_data.php');
+    u.searchParams.set('fe', 'f');
+    u.searchParams.set('tm', '');
+    u.searchParams.set('disp', '0');
+    u.searchParams.set('help', '2');
+    u.searchParams.set('authKey', deEncodedKey(key));
+    const r = await fetchWithTimeout(u.toString(), {}, 9000);
+    if (!r.ok) return [];
+    const bytes = new Uint8Array(await r.arrayBuffer());
+    const text = new TextDecoder('euc-kr').decode(bytes);
+    const parsed = parseWrnNow(text);
+    setCached(cacheKey, parsed, 60000);
+    return parsed;
+  });
+}
+
+async function fetchCapXml(file = '') {
+  const cleanFile = String(file || '').trim();
+  if (cleanFile && !/^KR\.W\d+_\d{12}_[A-Z]{2,6}_\d+_(EN|KR)\.xml$/.test(cleanFile)) {
+    throw new Error('유효하지 않은 CAP XML 파일명입니다.');
+  }
+  const cacheKey = `cap|${cleanFile || 'rss'}`;
+  const hit = getCached(cacheKey);
+  if (hit) return hit;
+  return withInFlight(cacheKey, async () => {
+    const targetUrl = cleanFile
+      ? `https://www.weather.go.kr/w/repositary/xml/wrn/xml/${cleanFile}`
+      : 'https://www.weather.go.kr/w/rss/cap/warning.do';
+    const r = await fetchWithTimeout(targetUrl, { headers: { 'User-Agent': 'Mozilla/5.0' } }, 10000);
+    if (!r.ok) throw new Error(`기상청 CAP 응답 오류 HTTP ${r.status}`);
+    const xml = await r.text();
+    setCached(cacheKey, xml, cleanFile ? 30 * 60000 : 60000);
+    return xml;
+  });
+}
+
+async function getCapPolygonMap() {
+  const cached = getCached('kma-cap-polygons');
+  if (cached) return cached;
+  const polyMap = new Map();
+  try {
+    const rssXml = await fetchCapXml('');
+    const links = extractCapLinksFromRss(rssXml, 12);
+    const docs = await Promise.allSettled(links.map(f => fetchCapXml(f)));
+    for (const res of docs) {
+      if (res.status === 'fulfilled') populateCapPolygons(res.value, polyMap);
+    }
+  } catch {}
+  setCached('kma-cap-polygons', polyMap, 120000);
+  return polyMap;
+}
+
+async function radarImage(env) {
+  const radarKey = getRadarKey(env);
+  if (!radarKey) throw new Error('KMA_RADAR_KEY 미설정');
+  const cacheKey = 'radar-visual';
+  const cache = getCached(cacheKey);
+  if (cache) return cache;
+  return withInFlight(cacheKey, async () => {
+    const u = new URL('https://apihub.kma.go.kr/api/typ03/cgi/rdr/nph-rdr_cmp1_img');
+    const p = { cmp: 'HSR', qcd: 'HSLP', obs: 'ECHD', color: 'C4', aws: '0', map: 'HR', grid: '2', legend: '1', size: '800', itv: '5', zoom_level: '0', zoom_x: '0000000', zoom_y: '0000000', gov: '', authKey: deEncodedKey(radarKey) };
+    for (const [k, v] of Object.entries(p)) u.searchParams.set(k, v);
+    const r = await fetchWithTimeout(u.toString(), {}, 12000);
+    if (!r.ok) throw new Error(`레이더 서버 오류 HTTP ${r.status}`);
+    const bytes = new Uint8Array(await r.arrayBuffer());
+    const type = detectRadarImageType(bytes);
+    const out = { bytes, type };
+    setCached(cacheKey, out, 4 * 60000);
+    return out;
+  });
+}
+
+export function __resetWorkerCaches() {
+  SHARED_CACHE.clear();
+  INFLIGHT.clear();
+  REQUESTS.clear();
+}
+
+export default {
+  async fetch(request, env = {}, ctx = null) {
+    const requestUrl = new URL(request.url);
+    const pathname = requestUrl.pathname;
+
+    if (request.method === 'OPTIONS') {
+      if (pathname.startsWith('/api/') || pathname === '/') {
+        return new Response(null, { status: 204, headers: buildCorsHeaders(request, env) });
+      }
+      return jsonResponse(request, env, 405, { error: '허용되지 않는 요청' });
+    }
+
+    if (request.method !== 'GET' && request.method !== 'HEAD') {
+      return jsonResponse(request, env, 405, { error: '허용되지 않는 요청' });
+    }
+
+    const roadLine = getRoadLineCode(env);
+
+    if (pathname === '/' || pathname === '/api/health') {
+      return jsonResponse(request, env, 200, {
+        status: 'ok',
+        runtime: 'cloudflare-workers',
+        forecastConfigured: !!getServiceKey(env),
+        radarConfigured: !!getRadarKey(env),
+        roadConfigured: !!getRoadKey(env),
+        roadLine
+      });
+    }
+
+    if (!pathname.startsWith('/api/')) {
+      return jsonResponse(request, env, 404, { error: 'API를 찾지 못했습니다.' });
+    }
+
+    const clientIp = request.headers.get('cf-connecting-ip') || request.headers.get('x-forwarded-for') || 'unknown';
+    if (!allow(clientIp)) {
+      return jsonResponse(request, env, 429, { error: '요청이 너무 많습니다. 잠시 후 다시 이용해 주세요.' });
+    }
+
+    // Check Edge Cache API (normalized radar key unless force=1)
+    const isForced = requestUrl.searchParams.get('force') === '1';
+    const cacheKeyReq = edgeCacheRequest(requestUrl, pathname === '/api/radar');
+    if (!isForced) {
+      const edgeHit = await matchEdgeCache(request, env, cacheKeyReq);
+      if (edgeHit) return edgeHit;
+    }
+
+    if (pathname === '/api/forecast') {
+      const lat = Number(requestUrl.searchParams.get('lat'));
+      const lon = Number(requestUrl.searchParams.get('lon'));
+      if (!Number.isFinite(lat) || !Number.isFinite(lon) || lat < 32 || lat > 39.5 || lon < 124 || lon > 132) {
+        return jsonResponse(request, env, 400, { error: '유효한 국내 위도·경도를 입력해 주세요.' });
+      }
+      if (!getServiceKey(env)) {
+        return jsonResponse(request, env, 503, { code: 'KEY_MISSING', error: '운영자가 기상청 예보 API 키를 등록하지 않았습니다.' });
+      }
+      try {
+        const value = await forecast(env, lat, lon);
+        const res = jsonResponse(request, env, 200, value, {
+          'Cache-Control': 'public, max-age=60, s-maxage=300, stale-while-revalidate=600'
+        });
+        putEdgeCache(ctx, cacheKeyReq, res);
+        return res;
+      } catch (e) {
+        return jsonResponse(request, env, 502, { error: errMessage(e) });
+      }
+    }
+
+    if (pathname === '/api/short-term-12') {
+      if (!getServiceKey(env)) {
+        return jsonResponse(request, env, 503, { code: 'KEY_MISSING', error: '운영자가 기상청 예보 API 키를 등록하지 않았습니다.' });
+      }
+      try {
+        const value = await fetchShortTerm12(env, isForced);
+        const res = jsonResponse(request, env, 200, value, {
+          'Cache-Control': isForced ? 'no-store' : 'public, max-age=180, s-maxage=300, stale-while-revalidate=600'
+        });
+        if (!isForced) putEdgeCache(ctx, cacheKeyReq, res);
+        return res;
+      } catch (e) {
+        return jsonResponse(request, env, 502, { error: errMessage(e) });
+      }
+    }
+
+    if (pathname === '/api/road-obs') {
+      if (!getRoadKey(env)) {
+        return jsonResponse(request, env, 503, { code: 'ROAD_KEY_MISSING', error: '도로기상관측 API 키가 설정되지 않았습니다.' });
+      }
+      const line = requestUrl.searchParams.get('line') || roadLine;
+      try {
+        const value = await fetchRoadStations(env, line);
+        const res = jsonResponse(request, env, 200, value, { 'Cache-Control': 'public, max-age=60, s-maxage=90' });
+        putEdgeCache(ctx, cacheKeyReq, res);
+        return res;
+      } catch (e) {
+        return jsonResponse(request, env, 502, { error: errMessage(e) });
+      }
+    }
+
+    if (pathname === '/api/road-risk') {
+      if (!getRoadKey(env)) {
+        return jsonResponse(request, env, 503, { code: 'ROAD_KEY_MISSING', error: '도로 위험기상정보 API 키가 설정되지 않았습니다.' });
+      }
+      const roadNum = requestUrl.searchParams.get('roadNum') || '012';
+      try {
+        const value = await fetchRoadRisk(env, roadNum);
+        const latRaw = requestUrl.searchParams.get('lat');
+        const lonRaw = requestUrl.searchParams.get('lon');
+        let out = value;
+        if (latRaw !== null && lonRaw !== null) {
+          const lat = Number(latRaw), lon = Number(lonRaw);
+          if (Number.isFinite(lat) && Number.isFinite(lon)) {
+            out = { ...value, customPlaceRisk: matchStationRiskForCoord(lat, lon, value.stationRisks, null, null, 6) };
+          }
+        }
+        const res = jsonResponse(request, env, 200, out, { 'Cache-Control': 'public, max-age=480, s-maxage=540' });
+        putEdgeCache(ctx, cacheKeyReq, res);
+        return res;
+      } catch (e) {
+        return jsonResponse(request, env, 502, { error: errMessage(e) });
+      }
+    }
+
+    if (pathname === '/api/observation') {
+      const lat = Number(requestUrl.searchParams.get('lat'));
+      const lon = Number(requestUrl.searchParams.get('lon'));
+      if (!Number.isFinite(lat) || !Number.isFinite(lon) || lat < 32 || lat > 39.5 || lon < 124 || lon > 132) {
+        return jsonResponse(request, env, 400, { error: '유효한 국내 위도·경도를 입력해 주세요.' });
+      }
+      try {
+        const obs = await getObservationForPlace(env, lat, lon);
+        const res = jsonResponse(request, env, 200, obs, { 'Cache-Control': 'public, max-age=60, s-maxage=90' });
+        putEdgeCache(ctx, cacheKeyReq, res);
+        return res;
+      } catch (e) {
+        return jsonResponse(request, env, 502, { error: errMessage(e) });
+      }
+    }
+
+    if (pathname === '/api/kma-cap') {
+      const file = requestUrl.searchParams.get('file') || '';
+      try {
+        const xml = await fetchCapXml(file);
+        const headers = buildCorsHeaders(request, env);
+        headers.set('Content-Type', 'application/xml; charset=utf-8');
+        headers.set('Cache-Control', file ? 'public, max-age=1800, s-maxage=1800' : 'public, max-age=60, s-maxage=60');
+        const res = new Response(request.method === 'HEAD' ? null : xml, { status: 200, headers });
+        putEdgeCache(ctx, cacheKeyReq, res);
+        return res;
+      } catch (e) {
+        return jsonResponse(request, env, 502, { error: errMessage(e) });
+      }
+    }
+
+    if (pathname === '/api/warnings') {
+      const name = (requestUrl.searchParams.get('name') || '').trim();
+      const latRaw = requestUrl.searchParams.get('lat');
+      const lonRaw = requestUrl.searchParams.get('lon');
+      const lat = latRaw !== null ? Number(latRaw) : NaN;
+      const lon = lonRaw !== null ? Number(lonRaw) : NaN;
+      try {
+        const all = await fetchWrnNowList(env);
+        const hasSubZones = all.some(w => w.regUpKo && w.regKo !== w.regUpKo);
+        const capPolyMap = name && hasSubZones ? await getCapPolygonMap() : new Map();
+        const matched = name
+          ? all.filter(w => warningMatchesPlace(w, name, lat, lon, capPolyMap))
+          : all;
+        const res = jsonResponse(
+          request,
+          env,
+          200,
+          { ok: true, updatedAt: new Date().toISOString(), warnings: sortWarnings(matched), totalNational: all.length },
+          { 'Cache-Control': 'public, max-age=55, s-maxage=55' }
+        );
+        putEdgeCache(ctx, cacheKeyReq, res);
+        return res;
+      } catch (e) {
+        return jsonResponse(request, env, 502, { error: errMessage(e) });
+      }
+    }
+
+    if (pathname === '/api/open-meteo') {
+      const endpoint = requestUrl.searchParams.get('endpoint') === 'ensemble' ? 'ensemble' : 'forecast';
+      const upstream = new URL(endpoint === 'ensemble' ? 'https://ensemble-api.open-meteo.com/v1/ensemble' : 'https://api.open-meteo.com/v1/forecast');
+      for (const [k, v] of requestUrl.searchParams.entries()) {
+        if (k !== 'endpoint') upstream.searchParams.set(k, v);
+      }
+      const cacheKey = `om|${upstream.toString()}`;
+      const maxAge = endpoint === 'ensemble' ? 1800 : 180;
+      const ttlMs = endpoint === 'ensemble' ? 30 * 60000 : 4 * 60000;
+      const hit = getCached(cacheKey);
+      if (hit) {
+        return jsonResponse(request, env, 200, hit, { 'Cache-Control': `public, max-age=${maxAge}, s-maxage=${maxAge}` });
+      }
+      try {
+        const data = await withInFlight(cacheKey, async () => {
+          const r = await fetchWithTimeout(upstream.toString(), {}, 12000);
+          if (r.status === 429) {
+            const err = new Error('Open-Meteo 요청 한도 초과(429)');
+            err.status = 429;
+            throw err;
+          }
+          if (!r.ok) throw new Error(`Open-Meteo HTTP ${r.status}`);
+          const parsed = await r.json();
+          setCached(cacheKey, parsed, ttlMs);
+          return parsed;
+        });
+        const res = jsonResponse(request, env, 200, data, { 'Cache-Control': `public, max-age=${maxAge}, s-maxage=${maxAge}` });
+        putEdgeCache(ctx, cacheKeyReq, res);
+        return res;
+      } catch (e) {
+        return jsonResponse(request, env, e?.status === 429 ? 429 : 502, { error: errMessage(e) });
+      }
+    }
+
+    if (pathname === '/api/search') {
+      const q = (requestUrl.searchParams.get('name') || '').trim();
+      if (!q) return jsonResponse(request, env, 200, { results: [] });
+      const cacheKey = `search|${q}`;
+      const hit = getCached(cacheKey);
+      if (hit) return jsonResponse(request, env, 200, hit, { 'Cache-Control': 'public, max-age=1800, s-maxage=1800' });
+      try {
+        const u = new URL('https://geocoding-api.open-meteo.com/v1/search');
+        u.searchParams.set('name', q);
+        u.searchParams.set('count', '12');
+        u.searchParams.set('language', 'ko');
+        u.searchParams.set('format', 'json');
+        const r = await fetchWithTimeout(u.toString(), {}, 7000);
+        const data = r.ok ? await r.json() : { results: [] };
+        setCached(cacheKey, data, 30 * 60000);
+        const res = jsonResponse(request, env, 200, data, { 'Cache-Control': 'public, max-age=1800, s-maxage=1800' });
+        putEdgeCache(ctx, cacheKeyReq, res);
+        return res;
+      } catch {
+        return jsonResponse(request, env, 200, { results: [] });
+      }
+    }
+
+    if (pathname === '/api/radar') {
+      if (!getRadarKey(env)) {
+        return jsonResponse(request, env, 503, { code: 'RADAR_KEY_MISSING', error: '레이더 API 키가 설정되지 않았습니다.' });
+      }
+      try {
+        const x = await radarImage(env);
+        const headers = buildCorsHeaders(request, env);
+        headers.set('Content-Type', x.type);
+        headers.set('Cache-Control', 'public, max-age=240, s-maxage=240');
+        const res = new Response(request.method === 'HEAD' ? null : x.bytes, { status: 200, headers });
+        putEdgeCache(ctx, cacheKeyReq, res);
+        return res;
+      } catch (e) {
+        return jsonResponse(request, env, 502, { error: errMessage(e) });
+      }
+    }
+
+    return jsonResponse(request, env, 404, { error: 'API를 찾지 못했습니다.' });
+  }
+};

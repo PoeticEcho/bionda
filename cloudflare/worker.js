@@ -180,7 +180,8 @@ async function fetchKma(env, resource, grid, base, timeout = 5000) {
     for (const baseUrl of bases) {
       try {
         const items = await fetchKmaFromBase(baseUrl, resource, grid, base, apiKey, timeout);
-        setCached(cacheKey, items, 12 * 60000);
+        const ttlMs = resource === 'getVilageFcst' ? 45 * 60000 : 5 * 60000;
+        setCached(cacheKey, items, ttlMs);
         return items;
       } catch (e) {
         lastErr = e;
@@ -222,23 +223,40 @@ async function forecast(env, lat, lon) {
   return buildForecastResult(grid, now, requests);
 }
 
-async function fetchShortTerm12(env) {
+async function fetchShortTerm12(env, force = false) {
   const apiKey = getServiceKey(env);
   if (!apiKey) throw new Error('KMA_SERVICE_KEY 미설정');
   const now = Date.now();
   const sBase = baseShort(now);
   const uBase = baseUltra(now);
   const cacheKey = `short12|${datePart(sBase)}|${timePart(sBase)}|${timePart(uBase)}`;
-  const hit = getCached(cacheKey);
+  const hit = !force ? getCached(cacheKey) : null;
   if (hit) return hit;
 
-  return withInFlight(cacheKey, async () => {
+  return withInFlight(force ? `${cacheKey}|force` : cacheKey, async () => {
+    let resolvedUBase = null;
+    let probePromise = null;
+    const fetchUltraSmart = async (grid) => {
+      if (!resolvedUBase) {
+        if (!probePromise) {
+          probePromise = fetchWithFallback(env, 'getUltraSrtFcst', grid, uBase, 60).then(res => {
+            resolvedUBase = res.notice ? new Date(uBase.getTime() - 60 * 60000) : uBase;
+            return { firstKey: `${grid.nx},${grid.ny}`, res };
+          });
+        }
+        const probed = await probePromise;
+        if (probed.firstKey === `${grid.nx},${grid.ny}`) return probed.res;
+      }
+      const activeBase = resolvedUBase || uBase;
+      return { items: await fetchKma(env, 'getUltraSrtFcst', grid, activeBase, 6000), base: isoKst(activeBase) };
+    };
+
     const payload = await collectShortTerm12({
       now,
       fetchShort: (grid) => fetchWithFallback(env, 'getVilageFcst', grid, sBase, 180),
-      fetchUltra: async (grid) => ({ items: await fetchKma(env, 'getUltraSrtFcst', grid, uBase, 6000), base: isoKst(uBase) })
+      fetchUltra: fetchUltraSmart
     });
-    setCached(cacheKey, payload, 15 * 60000);
+    setCached(cacheKey, payload, 5 * 60000);
     return payload;
   });
 }
@@ -530,11 +548,11 @@ export default {
         return jsonResponse(request, env, 503, { code: 'KEY_MISSING', error: '운영자가 기상청 예보 API 키를 등록하지 않았습니다.' });
       }
       try {
-        const value = await fetchShortTerm12(env);
+        const value = await fetchShortTerm12(env, isForced);
         const res = jsonResponse(request, env, 200, value, {
-          'Cache-Control': 'public, max-age=600, s-maxage=900, stale-while-revalidate=1800'
+          'Cache-Control': isForced ? 'no-store' : 'public, max-age=180, s-maxage=300, stale-while-revalidate=600'
         });
-        putEdgeCache(ctx, cacheKeyReq, res);
+        if (!isForced) putEdgeCache(ctx, cacheKeyReq, res);
         return res;
       } catch (e) {
         return jsonResponse(request, env, 502, { error: errMessage(e) });
