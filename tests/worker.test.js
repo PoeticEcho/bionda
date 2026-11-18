@@ -218,6 +218,17 @@ test('Cloudflare Worker는 CORS·OPTIONS·health·도로관측(중복 Ncst 생�
     assert.ok(s12.windowKPIs.h12.overlapRegions >= 1);
     assert.ok(!JSON.stringify(s12).includes('worker-secret-test-key'));
 
+    // Selective [새로고침] force=1&refreshShort=0&refreshUltra=1 bypasses only ultra cache, leaving VilageFcst cached
+    const vilageBefore = hitUrls.filter(u => u.includes('getVilageFcst')).length;
+    const ultraBefore = hitUrls.filter(u => u.includes('getUltraSrtFcst')).length;
+    const s12UltraOnly = await worker.fetch(new Request('https://bionda-api.workers.dev/api/short-term-12?force=1&refreshShort=0&refreshUltra=1'), env);
+    assert.equal(s12UltraOnly.status, 200);
+    assert.equal(s12UltraOnly.headers.get('cache-control'), 'no-store');
+    const vilageAfter = hitUrls.filter(u => u.includes('getVilageFcst')).length;
+    const ultraAfter = hitUrls.filter(u => u.includes('getUltraSrtFcst')).length;
+    assert.equal(vilageAfter, vilageBefore, 'refreshShort=0 시 단기예보 격자 캐시 유지');
+    assert.ok(ultraAfter >= ultraBefore + 11, 'refreshUltra=1 시 11격자 초단기예보 강제 재조회');
+
     // Warnings (EUC-KR decoding verification!)
     const wrnRes = await worker.fetch(new Request('https://bionda-api.workers.dev/api/warnings?name=' + encodeURIComponent('거창군남부') + '&lat=35.644&lon=127.910'), env);
     assert.equal(wrnRes.status, 200);

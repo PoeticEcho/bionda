@@ -533,7 +533,13 @@ test('12개 읍·면·동 1시간 단기예보(SHORT_TERM_12_REGIONS), 강수·�
   assert.equal(parsedCustom[1].key, '35.566,127.774');
 
   // hourly 정시 자동 새로고침 타이머 계산 + 누락 지역 그리드/열 정렬 깨짐 방지 검증
-  const { msUntilNextTopOfHour, alignHourlyMatrix } = await import('../public/hourly.js');
+  const {
+    msUntilNextTopOfHour,
+    alignHourlyMatrix,
+    computeManualRefreshFlags,
+    isUltraUpdateDue,
+    msUntilNextUltraRelease
+  } = await import('../public/hourly.js');
   assert.equal(msUntilNextTopOfHour(Date.parse('2026-11-19T05:57:30+09:00'), 1500), 151500);
   assert.equal(msUntilNextTopOfHour(Date.parse('2026-11-19T06:00:00+09:00'), 1500), 3601500);
 
@@ -591,4 +597,24 @@ test('12개 읍·면·동 1시간 단기예보(SHORT_TERM_12_REGIONS), 강수·�
   assert.equal(ultraAttempts.get('83,86'), 2);
   assert.equal(recoveredPayload.regions.find(r => r.id === 'ssangnim').hours[0].hourKst, 5);
   assert.equal(recoveredPayload.regions.find(r => r.id === 'seongsan').hours[0].hourKst, 5);
+
+  // [새로고침] 단기(>=3h)·초단기(>10m) 선택적 강제 재조회 판정 및 :36초단기 픽업 타이머 검증
+  const src0500 = { shortBase: '2026-11-19T05:00:00+09:00', ultraBase: '2026-11-19T05:30:00+09:00' };
+  // 05:38 KST: 단기 경과 38m(<3h), 초단기 경과 8m(<=10m) -> 둘 다 false
+  const fSoon = computeManualRefreshFlags(src0500, Date.parse('2026-11-19T05:38:00+09:00'));
+  assert.equal(fSoon.force, true);
+  assert.equal(fSoon.refreshShort, false);
+  assert.equal(fSoon.refreshUltra, false);
+  // 06:26 KST: 단기 경과 86m(<3h), 초단기 경과 56m(>10m) -> 초단기만 true
+  const fMid = computeManualRefreshFlags(src0500, Date.parse('2026-11-19T06:26:00+09:00'));
+  assert.equal(fMid.refreshShort, false);
+  assert.equal(fMid.refreshUltra, true);
+  // 08:05 KST: 단기 경과 185m(>=3h), 초단기 경과 155m(>10m) -> 둘 다 true
+  const fLate = computeManualRefreshFlags(src0500, Date.parse('2026-11-19T08:05:00+09:00'));
+  assert.equal(fLate.refreshShort, true);
+  assert.equal(fLate.refreshUltra, true);
+
+  assert.equal(isUltraUpdateDue(src0500, Date.parse('2026-11-19T06:34:00+09:00')), false);
+  assert.equal(isUltraUpdateDue(src0500, Date.parse('2026-11-19T06:36:10+09:00')), true);
+  assert.equal(msUntilNextUltraRelease(Date.parse('2026-11-19T06:30:00+09:00'), 36, 15), 375000);
 });

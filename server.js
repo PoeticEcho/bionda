@@ -148,14 +148,14 @@ async function fetchKmaFromBase(baseUrl, resource, grid, base, rawKey, timeout =
   return parseKmaForecastJson(await r.text());
 }
 
-async function fetchKma(resource, grid, base, timeout = 5000) {
+async function fetchKma(resource, grid, base, timeout = 5000, bypassCache = false) {
   const apiKey = getServiceKey();
   if (!apiKey) throw new Error('KMA_SERVICE_KEY 미설정');
   const cacheKey = `kma|${resource}|${grid.nx}|${grid.ny}|${datePart(base)}|${timePart(base)}`;
-  const hit = getCached(cacheKey);
+  const hit = !bypassCache ? getCached(cacheKey) : null;
   if (hit) return hit;
 
-  return withInFlight(cacheKey, async () => {
+  return withInFlight(bypassCache ? `${cacheKey}|bypass` : cacheKey, async () => {
     const isApiHubKey = /^[A-Za-z0-9_-]{20,26}$/.test(apiKey.trim()) && !apiKey.includes('dummy');
     const bases = isApiHubKey
       ? [APIHUB_FCST_BASE, DATA_GO_KR_BASE]
@@ -176,11 +176,11 @@ async function fetchKma(resource, grid, base, timeout = 5000) {
   });
 }
 
-async function fetchWithFallback(resource, grid, base, prevMinutes) {
-  try { return { items: await fetchKma(resource, grid, base), base: isoKst(base) }; }
+async function fetchWithFallback(resource, grid, base, prevMinutes, bypassCache = false) {
+  try { return { items: await fetchKma(resource, grid, base, 5000, bypassCache), base: isoKst(base) }; }
   catch (error) {
     const previous = new Date(base.getTime() - prevMinutes * 60000);
-    try { return { items: await fetchKma(resource, grid, previous), base: isoKst(previous), notice: '최신 발표분을 가져오지 못해 직전 발표분 사용' }; }
+    try { return { items: await fetchKma(resource, grid, previous, 5000, bypassCache), base: isoKst(previous), notice: '최신 발표분을 가져오지 못해 직전 발표분 사용' }; }
     catch { throw error; }
   }
 }
@@ -197,23 +197,31 @@ async function forecast(lat, lon) {
   return buildForecastResult(grid, now, requests);
 }
 
-async function fetchShortTerm12(force = false) {
+async function fetchShortTerm12(optionsOrForce = false) {
   if (!getServiceKey()) throw new Error('KMA_SERVICE_KEY 미설정');
+  const opts = typeof optionsOrForce === 'object' && optionsOrForce !== null
+    ? optionsOrForce
+    : { force: Boolean(optionsOrForce) };
+  const force = Boolean(opts.force);
+  const refreshShort = opts.refreshShort !== undefined ? Boolean(opts.refreshShort) : force;
+  const refreshUltra = opts.refreshUltra !== undefined ? Boolean(opts.refreshUltra) : force;
+  const bypassTop = force || refreshShort || refreshUltra;
+
   const now = Date.now();
   const sBase = baseShort(now);
   const uBase = baseUltra(now);
   const curHour = timePart(kst(now)).slice(0, 2);
   const cacheKey = `short12|${datePart(sBase)}|${timePart(sBase)}|${timePart(uBase)}|h${curHour}`;
-  const hit = !force ? getCached(cacheKey) : null;
+  const hit = !bypassTop ? getCached(cacheKey) : null;
   if (hit) return hit;
 
-  return withInFlight(force ? `${cacheKey}|force` : cacheKey, async () => {
+  return withInFlight(bypassTop ? `${cacheKey}|force` : cacheKey, async () => {
     let resolvedUBase = null;
     let probePromise = null;
     const fetchUltraSmart = async (grid) => {
       if (!resolvedUBase) {
         if (!probePromise) {
-          probePromise = fetchWithFallback('getUltraSrtFcst', grid, uBase, 60).then(res => {
+          probePromise = fetchWithFallback('getUltraSrtFcst', grid, uBase, 60, refreshUltra).then(res => {
             resolvedUBase = res.notice ? new Date(uBase.getTime() - 60 * 60000) : uBase;
             return { firstKey: `${grid.nx},${grid.ny}`, res };
           });
@@ -222,15 +230,16 @@ async function fetchShortTerm12(force = false) {
         if (probed.firstKey === `${grid.nx},${grid.ny}`) return probed.res;
       }
       const activeBase = resolvedUBase || uBase;
-      return { items: await fetchKma('getUltraSrtFcst', grid, activeBase, 6000), base: isoKst(activeBase) };
+      return { items: await fetchKma('getUltraSrtFcst', grid, activeBase, 6000, refreshUltra), base: isoKst(activeBase) };
     };
 
     const payload = await collectShortTerm12({
       now,
-      fetchShort: (grid) => fetchWithFallback('getVilageFcst', grid, sBase, 180),
+      fetchShort: (grid) => fetchWithFallback('getVilageFcst', grid, sBase, 180, refreshShort),
       fetchUltra: fetchUltraSmart
     });
-    setCached(cacheKey, payload, 5 * 60000);
+    const pendingUltra = resolvedUBase && resolvedUBase.getTime() < uBase.getTime();
+    setCached(cacheKey, payload, pendingUltra ? 45000 : 5 * 60000);
     return payload;
   });
 }
@@ -643,12 +652,23 @@ const server = http.createServer(async (req, res) => {
       if (!getServiceKey()) return sendJson(res, 503, { code: 'KEY_MISSING', error: '운영자가 기상청 예보 API 키를 등록하지 않았습니다.' });
       try {
         const isForced = requestUrl.searchParams.get('force') === '1';
-        const value = await fetchShortTerm12(isForced);
-        const secsToHour = Math.max(5, Math.ceil((3600000 - (Date.now() % 3600000)) / 1000));
-        const maxAge = Math.min(180, secsToHour);
-        const sMaxAge = Math.min(300, secsToHour);
+        const rsParam = requestUrl.searchParams.get('refreshShort');
+        const ruParam = requestUrl.searchParams.get('refreshUltra');
+        const refreshShort = rsParam !== null ? rsParam === '1' : isForced;
+        const refreshUltra = ruParam !== null ? ruParam === '1' : isForced;
+        const value = await fetchShortTerm12({ force: isForced, refreshShort, refreshUltra });
+        const nowMs = Date.now();
+        const kstMin = kst(nowMs).getUTCMinutes();
+        const secsToHour = Math.max(5, Math.ceil((3600000 - (nowMs % 3600000)) / 1000));
+        const minsPast35 = kstMin < 35 ? (35 - kstMin) * 60 : 3600;
+        const expectedUltraIso = isoKst(baseUltra(nowMs));
+        const pendingUltraRelease = value?.sources?.ultraBase && Date.parse(value.sources.ultraBase) < Date.parse(expectedUltraIso);
+        const capSec = pendingUltraRelease ? 45 : 300;
+        const maxAge = Math.min(180, secsToHour, minsPast35, capSec);
+        const sMaxAge = Math.min(300, secsToHour, minsPast35, capSec);
+        const bypassAllCache = isForced || refreshShort || refreshUltra;
         return sendJson(res, 200, value, {
-          'Cache-Control': isForced ? 'no-store' : `public, max-age=${maxAge}, s-maxage=${sMaxAge}, stale-while-revalidate=60`
+          'Cache-Control': bypassAllCache ? 'no-store' : `public, max-age=${maxAge}, s-maxage=${sMaxAge}, stale-while-revalidate=60`
         });
       } catch (e) {
         return sendJson(res, 502, { error: errMessage(e) });
