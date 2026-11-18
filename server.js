@@ -753,6 +753,75 @@ async function fetchCapXml(file = '') {
   return xml;
 }
 
+function inPolygon(lat, lon, polygon) {
+  const pts = String(polygon || '').trim().split(/\s+/).map(s => s.split(',').map(Number));
+  if (pts.length < 3 || pts.some(p => p.length !== 2 || !p.every(Number.isFinite))) return false;
+  let hit = false;
+  for (let i = 0, j = pts.length - 1; i < pts.length; j = i++) {
+    const [y, x] = pts[i], [yy, xx] = pts[j];
+    if ((y > lat) !== (yy > lat) && lon < (xx - x) * (lat - y) / (yy - y) + x) hit = !hit;
+  }
+  return hit;
+}
+
+async function getCapPolygonMap() {
+  const cached = getCached('kma-cap-polygons');
+  if (cached) return cached;
+  const polyMap = new Map();
+  try {
+    const rssXml = await fetchCapXml('');
+    const links = [...rssXml.matchAll(/<link>(https?:\/\/[^<]+)<\/link>/g)]
+      .map(m => m[1])
+      .map(u => {
+        const m = u.match(/\/w\/repositary\/xml\/wrn\/xml\/([^/]+\.xml)$/);
+        return m ? m[1].replace(/_EN\.xml$/, '_KR.xml') : null;
+      })
+      .filter(Boolean)
+      .slice(0, 12);
+
+    const docs = await Promise.allSettled(links.map(f => fetchCapXml(f)));
+    for (const res of docs) {
+      if (res.status !== 'fulfilled') continue;
+      const areas = res.value.match(/<area>[\s\S]*?<\/area>/g) || [];
+      for (const a of areas) {
+        const desc = a.match(/<areaDesc>([^<]+)<\/areaDesc>/)?.[1]?.replace(/\s+/g, '');
+        const polys = [...a.matchAll(/<polygon>([^<]+)<\/polygon>/g)].map(m => m[1]);
+        if (desc && polys.length) {
+          const prev = polyMap.get(desc) || [];
+          polyMap.set(desc, [...prev, ...polys]);
+        }
+      }
+    }
+  } catch {}
+  setCached('kma-cap-polygons', polyMap, 120000);
+  return polyMap;
+}
+
+function warningMatchesPlace(w, targetName, lat, lon, capPolyMap) {
+  const clean = s => String(s || '').replace(/\s+/g, '');
+  const target = clean(targetName);
+  if (!target) return true;
+  const rKo = clean(w.regKo);
+  const rUp = clean(w.regUpKo);
+  if (rKo === target || (rKo.length >= 2 && target.includes(rKo))) return true;
+
+  const isSubZone = Boolean((rUp && rKo !== rUp) || /(서북|서남|동북|동남|중북|중남|동부|서부|남부|북부|중부|산지|평지)$/.test(rKo));
+  if (isSubZone) {
+    if (Number.isFinite(lat) && Number.isFinite(lon) && capPolyMap?.has(rKo)) {
+      return capPolyMap.get(rKo).some(poly => inPolygon(lat, lon, poly));
+    }
+    const cleanDir = s => s.replace(/군|시|구/g, '');
+    return cleanDir(rKo) === cleanDir(target);
+  }
+
+  if (rKo.includes(target)) return true;
+  const prefix2 = target.slice(0, 2);
+  if (prefix2.length === 2 && ['함양', '거창', '합천', '고령', '남원', '달성'].includes(prefix2)) {
+    return rKo.includes(prefix2) || rUp.includes(prefix2);
+  }
+  return false;
+}
+
 async function radarImage() {
   const radarKey = getRadarKey();
   if (!radarKey) throw new Error('KMA_RADAR_KEY 미설정');
@@ -878,23 +947,16 @@ const server = http.createServer(async (req, res) => {
 
     if (pathname === '/api/warnings') {
       const name = (requestUrl.searchParams.get('name') || '').trim();
+      const latRaw = requestUrl.searchParams.get('lat');
+      const lonRaw = requestUrl.searchParams.get('lon');
+      const lat = latRaw !== null ? Number(latRaw) : NaN;
+      const lon = lonRaw !== null ? Number(lonRaw) : NaN;
       try {
         const all = await fetchWrnNowList();
-        const clean = s => String(s || '').replace(/\s+/g, '');
-        const target = clean(name);
-        // Match exact zone or parent administrative region
-        const matched = target
-          ? all.filter(w => {
-              const rKo = clean(w.regKo);
-              const rUp = clean(w.regUpKo);
-              if (rKo === target || target.includes(rKo) || rKo.includes(target)) return true;
-              // Match county/city prefix (e.g. 함양중부 / 함양 -> 함양군)
-              const prefix2 = target.slice(0, 2);
-              if (prefix2.length === 2 && ['함양', '거창', '합천', '고령', '남원', '달성'].includes(prefix2)) {
-                return rKo.includes(prefix2) || rUp.includes(prefix2);
-              }
-              return false;
-            })
+        const hasSubZones = all.some(w => w.regUpKo && w.regKo !== w.regUpKo);
+        const capPolyMap = name && hasSubZones ? await getCapPolygonMap() : new Map();
+        const matched = name
+          ? all.filter(w => warningMatchesPlace(w, name, lat, lon, capPolyMap))
           : all;
         return sendJson(res, 200, { ok: true, updatedAt: new Date().toISOString(), warnings: sortWarnings(matched), totalNational: all.length });
       } catch (e) {
@@ -972,5 +1034,7 @@ module.exports = {
   matchRoadStation,
   parseWrnNow,
   sortWarnings,
+  inPolygon,
+  warningMatchesPlace,
   server
 };

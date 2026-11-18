@@ -2,7 +2,7 @@ const { test } = require('node:test');
 const assert = require('node:assert/strict');
 const fs = require('node:fs');
 const path = require('node:path');
-const { parseRoadStations, matchRoadStation, parseWrnNow, sortWarnings, analyze } = require('../server');
+const { parseRoadStations, matchRoadStation, parseWrnNow, sortWarnings, analyze, warningMatchesPlace } = require('../server');
 
 test('광주대구선(14번) 도로기상관측 매분자료 파싱 및 8개 관심지역 최근접 매칭', () => {
   const sampleRaw = [
@@ -259,4 +259,20 @@ test('classifySeverityTier는 4단계(회색->노랑->주황->빨강) 색상 등
   });
   assert.equal(tierHeavyRain.tier, 3);
   assert.equal(tierHeavyRain.cls, 'tier-danger');
+});
+
+test('세부 특보구역(함양서북부)은 CAP 폴리곤 좌표 기준으로 함양중부(지곡면)·함양(함양읍)에 오매칭되지 않는다', () => {
+  const nwPoly = '35.620,127.550 35.750,127.550 35.750,127.780 35.620,127.780';
+  const capMap = new Map([['함양서북부', [nwPoly]]]);
+  const wSubZone = { regUpKo: '함양군', regKo: '함양서북부', kind: '한파', level: '주의보' };
+  const wWholeCounty = { regUpKo: '함양군', regKo: '함양군', kind: '대설', level: '주의보' };
+
+  // 지곡면(함양중부) & 함양읍은 서북부 폴리곤 외부 -> 세부 구역 미매칭, 군 전체 특보만 매칭
+  assert.equal(warningMatchesPlace(wSubZone, '함양중부', 35.566, 127.774, capMap), false);
+  assert.equal(warningMatchesPlace(wSubZone, '함양', 35.520, 127.725, capMap), false);
+  assert.equal(warningMatchesPlace(wWholeCounty, '함양중부', 35.566, 127.774, capMap), true);
+  assert.equal(warningMatchesPlace(wWholeCounty, '함양', 35.520, 127.725, capMap), true);
+
+  // 서상면(35.69, 127.66)은 서북부 폴리곤 내부 -> 매칭됨
+  assert.equal(warningMatchesPlace(wSubZone, '함양서북부 테스트', 35.690, 127.660, capMap), true);
 });
