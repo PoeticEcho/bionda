@@ -57,7 +57,16 @@ test('야간 천체 가시성 물리: 맑음(달+별 선명), 구름많음(구�
 });
 
 test('주야간 시각 추론 및 KMA 수치 코드 → 히어로 장면 자동 매핑 검증', async () => {
-  const { resolveDayPhase, inferWeatherFromKma, renderHeroSceneMarkup } = await loadHeroModule();
+  const {
+    resolveDayPhase,
+    inferWeatherFromKma,
+    renderHeroSceneMarkup,
+    resolveHeroScene,
+    HIGHWAY_TOP_RAIL,
+    HIGHWAY_BOT_RAIL,
+    HIGHWAY_BEACON_TS,
+    evalCubicBezier
+  } = await loadHeroModule();
   const sampleDate = new Date('2026-11-19T00:00:00+09:00');
 
   assert.equal(resolveDayPhase({ date: sampleDate, hourKst: 7.0 }), 'dawn');
@@ -75,20 +84,37 @@ test('주야간 시각 추론 및 KMA 수치 코드 → 히어로 장면 자동 
   assert.equal(inferWeatherFromKma({ sky: '3', pty: '0' }), 'partly_cloudy');
   assert.equal(inferWeatherFromKma({ sky: '1', pty: '0' }), 'clear');
 
-  // 다중 렌더링 시 SVG <defs> ID 충돌이 발생하지 않는지 확인 및 0~3단계 도로 살얼음 색상/태풍 기호 검증
+  // 다중 렌더링 시 SVG <defs> ID 충돌이 발생하지 않는지 확인 및 0~3단계 살얼음 라벨/색상 검증
   const first = renderHeroSceneMarkup({ dayPhase: 'night', weather: 'partly_cloudy', moonAgeDays: 14.8, blackIce: true, coldWave: true });
   const second = renderHeroSceneMarkup({ dayPhase: 'night', weather: 'partly_cloudy', moonAgeDays: 14.8, iceRank: 3, coldWave: true });
   assert.equal(first.scene.iceRank, 2);
   assert.equal(first.scene.iceMeta.accent, '#f97316');
+  assert.equal(first.scene.iceMeta.shortLabel, '살얼음 주의');
   assert.equal(second.scene.iceRank, 3);
   assert.equal(second.scene.iceMeta.accent, '#ef4444');
-  assert.ok(second.html.includes('3단계 위험'));
+  assert.ok(second.html.includes('살얼음 위험'));
   const rank1 = renderHeroSceneMarkup({ dayPhase: 'day', weather: 'clear', iceRank: 1 });
   assert.equal(rank1.scene.iceMeta.accent, '#eab308');
-  assert.ok(rank1.html.includes('1단계 관심'));
+  assert.ok(rank1.html.includes('살얼음 관심'));
   const rank0 = renderHeroSceneMarkup({ dayPhase: 'day', weather: 'clear', iceRank: 0 });
   assert.equal(rank0.scene.iceMeta.accent, '#10b981');
   assert.ok(!rank0.html.includes('hs-road-stage-pill'));
+
+  // 비콘 좌표가 상단 방호벽 곡선 경계(HIGHWAY_TOP_RAIL)에 정확히 일치하며 갓길 실선/차선 안으로 침범하지 않는지 검증
+  for (const bt of HIGHWAY_BEACON_TS) {
+    const pTop = evalCubicBezier(HIGHWAY_TOP_RAIL, bt);
+    const pBot = evalCubicBezier(HIGHWAY_BOT_RAIL, bt);
+    const shoulderY = pTop.y + (pBot.y - pTop.y) * 0.14;
+    const beaconCy = pTop.y - 0.8;
+    assert.ok(beaconCy < shoulderY - 1.5, `t=${bt} 비콘(${beaconCy.toFixed(1)})은 갓길 실선(${shoulderY.toFixed(1)}) 바깥에 위치해야 함`);
+    assert.ok(rank0.html.includes(`cx="${pTop.x.toFixed(1)}" cy="${beaconCy.toFixed(1)}"`), `정확한 비콘 좌표 cx=${pTop.x.toFixed(1)} 포함`);
+  }
+
+  // 풍속에 따른 구름 둥실 유영 주기(--hs-cloud-dur) 연동 검증
+  const calmScene = resolveHeroScene({ dayPhase: 'day', weather: 'partly_cloudy', windSpeed: 0.6 });
+  const briskScene = resolveHeroScene({ dayPhase: 'day', weather: 'partly_cloudy', windSpeed: 12.0 });
+  assert.ok(calmScene.cloudDrift.durSec > briskScene.cloudDrift.durSec, '강풍일수록 구름 유영 주기가 빨라져야 함');
+  assert.ok(first.html.includes('--hs-cloud-dur:'));
 
   const ty = renderHeroSceneMarkup({
     dayPhase: 'day',
@@ -99,9 +125,9 @@ test('주야간 시각 추론 및 KMA 수치 코드 → 히어로 장면 자동 
   assert.ok(ty.html.includes('940 hPa'));
   assert.ok(ty.html.includes('hs-typhoon-tag'));
   assert.ok(!ty.html.includes('hs-typhoon-svg'));
-  // 화면 전체 끝까지 끊김 없이 이어지는 풀블리드 도로(-20..) + 좌측 그라데이션 페이드 마스크 확인
+  // 화면 전체 끝까지 끊김 없이 이어지는 풀블리드 도로(-20.0..) + 좌측 그라데이션 페이드 마스크 확인
   assert.ok(ty.html.includes('roadMask'));
-  assert.ok(ty.html.includes('M-20,'));
+  assert.ok(ty.html.includes('M-20.0,'));
 
   const idsA = [...first.html.matchAll(/\bid="([^"]+)"/g)].map(m => m[1]);
   const idsB = [...second.html.matchAll(/\bid="([^"]+)"/g)].map(m => m[1]);
