@@ -495,10 +495,40 @@ test('12개 읍·면·동 1시간 단기예보(SHORT_TERM_12_REGIONS), 강수·�
   assert.equal(sum.maxTemp, 2);
   assert.equal(sum.maxPop, 80);
 
-  assert.equal(getKmaIconInfo({ sky: '1', pty: '0', isNight: false }).code, 'NB01');
-  assert.equal(getKmaIconInfo({ sky: '1', pty: '0', isNight: true }).code, 'NB02');
-  assert.equal(getKmaIconInfo({ sky: '3', pty: '0', isNight: true }).code, 'NB06');
-  assert.equal(getKmaIconInfo({ sky: '4', pty: '3', isNight: false }).code, 'NB11');
-  assert.ok(renderKmaIconSvg({ sky: '4', pty: '1', isNight: false }).includes('<svg'));
+  // 전종 기상청 내장 SVG 아이콘(맑음/구름/흐림/비/눈/소나기/빗방울/눈날림/비·눈/번개·뇌우 전종) 및 LGT 낙뢰 분류 검증
+  const iconSpecs = [
+    [{ sky: '1', pty: '0', isNight: false }, 'NB01'],
+    [{ sky: '1', pty: '0', isNight: true }, 'NB02'],
+    [{ sky: '4', pty: '0', lightning: true }, 'NB04'],
+    [{ sky: '2', pty: '0', isNight: false }, 'NB05'],
+    [{ sky: '3', pty: '0', isNight: false }, 'NB05'],
+    [{ sky: '3', pty: '0', isNight: true }, 'NB06'],
+    [{ sky: '4', pty: '0', isNight: false }, 'NB07'],
+    [{ sky: '4', pty: '4', isNight: false }, 'NB08'],
+    [{ sky: '4', pty: '1', isNight: false }, 'NB09'],
+    [{ sky: '4', pty: '5', isNight: false }, 'NB10'],
+    [{ sky: '4', pty: '3', isNight: false }, 'NB11'],
+    [{ sky: '4', pty: '7', isNight: false }, 'NB12'],
+    [{ sky: '4', pty: '2', isNight: false }, 'NB13'],
+    [{ sky: '4', pty: '1', lightning: true }, 'NB14'],
+    [{ sky: '4', pty: '6', isNight: false }, 'NB15'],
+    [{ sky: '4', pty: '3', lightning: true }, 'NB16']
+  ];
+  for (const [spec, expectedCode] of iconSpecs) {
+    const info = getKmaIconInfo(spec);
+    assert.equal(info.code, expectedCode);
+    const svg = renderKmaIconSvg(spec);
+    assert.ok(svg.includes('<svg') && svg.includes('</svg>'));
+  }
+  assert.equal(core.classify({ SKY: '4', PTY: '1', LGT: '2.5', T1H: '14' }).lightning, true);
+  assert.equal(core.classify({ SKY: '1', PTY: '0', LGT: '0', T1H: '14' }).lightning, false);
   assert.ok(renderWindArrowSvg(315).includes('rotate('));
+
+  // /api/overview-bundle 좌표 파서 검증 (국내 범위 외 제외, 중복 제거)
+  const parsedDefault = core.parseOverviewPlacesParam('');
+  assert.equal(parsedDefault.length, 8);
+  const parsedCustom = core.parseOverviewPlacesParam('남상면|35.644,127.910;중복|35.644,127.910;해외|50.0,10.0;지곡면|35.566,127.774');
+  assert.equal(parsedCustom.length, 2);
+  assert.equal(parsedCustom[0].key, '35.644,127.910');
+  assert.equal(parsedCustom[1].key, '35.566,127.774');
 });

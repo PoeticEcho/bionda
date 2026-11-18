@@ -43,7 +43,8 @@ const {
   parseRoadRiskCsv,
   buildRoadRiskPayload,
   matchStationRiskForCoord,
-  collectShortTerm12
+  collectShortTerm12,
+  parseOverviewPlacesParam
 } = core;
 
 // Load local .env if present and not already loaded
@@ -356,6 +357,117 @@ async function getObservationForPlace(lat, lon) {
   return out;
 }
 
+async function fetchOverviewBundle({ placesParam = '', line = ROAD_LINE_CODE, roadNum = '012', force = false } = {}) {
+  const places = parseOverviewPlacesParam(placesParam);
+  if (!places.length) throw new Error('조회할 유효한 국내 좌표가 없습니다.');
+  const now = Date.now();
+  const sBase = baseShort(now);
+  const uBase = baseUltra(now);
+  const oBase = baseObservation(now);
+  const bundleKey = `bundle|${line}|${roadNum}|${places.map(p => p.key).join('|')}|${timePart(uBase)}|${timePart(sBase)}`;
+  const hit = !force ? getCached(bundleKey) : null;
+  if (hit) return hit;
+
+  return withInFlight(force ? `${bundleKey}|force` : bundleKey, async () => {
+    const [roadSettled, riskSettled, wrnSettled] = await Promise.allSettled([
+      getRoadKey() ? fetchRoadStations(line) : Promise.resolve(null),
+      getRoadKey() ? fetchRoadRisk(roadNum) : Promise.resolve(null),
+      fetchWrnNowList()
+    ]);
+    const roadData = roadSettled.status === 'fulfilled' ? roadSettled.value : null;
+    const roadRisk = riskSettled.status === 'fulfilled' ? riskSettled.value : null;
+    const allWarnings = wrnSettled.status === 'fulfilled' ? wrnSettled.value : [];
+    const hasSubZones = allWarnings.some(w => w.regUpKo && w.regKo !== w.regUpKo);
+    const capPolyMap = hasSubZones ? await getCapPolygonMap() : new Map();
+
+    // 각 지점별 도로관측 매칭 먼저 계산 후, 관측 결측 지점의 고유 격자만 getUltraSrtNcst 추가 조회
+    const placeRoadMatches = new Map();
+    const gridNeedsNcst = new Set();
+    const uniqueGrids = new Map();
+    for (const p of places) {
+      const gk = `${p.grid.nx},${p.grid.ny}`;
+      if (!uniqueGrids.has(gk)) uniqueGrids.set(gk, p.grid);
+      const rm = roadData?.stations?.length ? matchRoadStation(p.lat, p.lon, roadData.stations) : null;
+      const validRm = rm && rm.distanceKm <= 28 ? rm : null;
+      placeRoadMatches.set(p.key, validRm);
+      if (!validRm || validRm.temp === null || validRm.humidity === null) {
+        gridNeedsNcst.add(gk);
+      }
+    }
+
+    const gridEntries = [...uniqueGrids.entries()];
+    const gridResults = new Map();
+    if (getServiceKey()) {
+      let resolvedUBase = null;
+      let ultraProbePromise = null;
+      const fetchBundleUltra = async (grid) => {
+        if (!resolvedUBase) {
+          if (!ultraProbePromise) {
+            ultraProbePromise = fetchWithFallback('getUltraSrtFcst', grid, uBase, 60).then(res => {
+              resolvedUBase = res.notice ? new Date(uBase.getTime() - 60 * 60000) : uBase;
+              return { firstKey: `${grid.nx},${grid.ny}`, res };
+            });
+          }
+          const probed = await ultraProbePromise;
+          if (probed.firstKey === `${grid.nx},${grid.ny}`) return probed.res;
+        }
+        const activeBase = resolvedUBase || uBase;
+        return { items: await fetchKma('getUltraSrtFcst', grid, activeBase, 6000), base: isoKst(activeBase) };
+      };
+
+      await Promise.allSettled(gridEntries.map(async ([gk, grid]) => {
+        const requests = await Promise.allSettled([
+          fetchBundleUltra(grid),
+          fetchWithFallback('getVilageFcst', grid, sBase, 180),
+          gridNeedsNcst.has(gk) ? fetchWithFallback('getUltraSrtNcst', grid, oBase, 60) : Promise.resolve(null)
+        ]);
+        gridResults.set(gk, requests);
+      }));
+    }
+
+    const items = {};
+    for (const p of places) {
+      const gk = `${p.grid.nx},${p.grid.ny}`;
+      const reqs = gridResults.get(gk);
+      const rm = placeRoadMatches.get(p.key) || null;
+      const ncstSettled = reqs?.[2]?.status === 'fulfilled' && reqs[2].value ? reqs[2] : null;
+      const kmaNcst = ncstSettled ? parseNcstValues(ncstSettled.value, p.grid) : null;
+      const observation = (rm || kmaNcst) ? mergeObservationResult(rm, kmaNcst) : null;
+
+      let fcst = null;
+      if (reqs && (reqs[0].status === 'fulfilled' || reqs[1].status === 'fulfilled')) {
+        try {
+          fcst = buildForecastResult(p.grid, now, [
+            reqs[0],
+            reqs[1],
+            ncstSettled || { status: 'rejected', reason: new Error('road obs matched') }
+          ]);
+        } catch {}
+      }
+
+      const matchedWrn = sortWarnings(allWarnings.filter(w => warningMatchesPlace(w, p.name, p.lat, p.lon, capPolyMap)));
+      items[p.key] = {
+        name: p.name,
+        observation,
+        forecast: fcst,
+        warnings: matchedWrn
+      };
+    }
+
+    const payload = {
+      ok: true,
+      mode: 'overview-bundle',
+      updatedAt: new Date(now).toISOString(),
+      roadLine: String(line),
+      roadStations: roadData?.stations || [],
+      roadRisk,
+      items
+    };
+    setCached(bundleKey, payload, 90000);
+    return payload;
+  });
+}
+
 async function fetchWrnNowList() {
   const key = getServiceKey();
   if (!key) return [];
@@ -403,7 +515,7 @@ async function getCapPolygonMap() {
   const polyMap = new Map();
   try {
     const rssXml = await fetchCapXml('');
-    const links = extractCapLinksFromRss(rssXml, 12);
+    const links = extractCapLinksFromRss(rssXml, 8);
     const docs = await Promise.allSettled(links.map(f => fetchCapXml(f)));
     for (const res of docs) {
       if (res.status === 'fulfilled') populateCapPolygons(res.value, polyMap);
@@ -505,6 +617,22 @@ const server = http.createServer(async (req, res) => {
       try {
         const value = await forecast(lat, lon);
         return sendJson(res, 200, value, { 'Cache-Control': 'public, max-age=60, s-maxage=300, stale-while-revalidate=600' });
+      } catch (e) {
+        return sendJson(res, 502, { error: errMessage(e) });
+      }
+    }
+
+    if (pathname === '/api/overview-bundle') {
+      if (!getServiceKey() && !getRoadKey()) return sendJson(res, 503, { code: 'KEY_MISSING', error: '운영자가 기상청 API 키를 등록하지 않았습니다.' });
+      try {
+        const isForced = requestUrl.searchParams.get('force') === '1';
+        const line = requestUrl.searchParams.get('line') || ROAD_LINE_CODE;
+        const roadNum = requestUrl.searchParams.get('roadNum') || '012';
+        const placesParam = requestUrl.searchParams.get('places') || '';
+        const value = await fetchOverviewBundle({ placesParam, line, roadNum, force: isForced });
+        return sendJson(res, 200, value, {
+          'Cache-Control': isForced ? 'no-store' : 'public, max-age=60, s-maxage=90'
+        });
       } catch (e) {
         return sendJson(res, 502, { error: errMessage(e) });
       }

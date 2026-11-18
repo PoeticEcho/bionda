@@ -95,15 +95,16 @@ function skyText(sky, pty) {
   if (s === '4') return '흐림';
   return '대체로 맑음';
 }
-function kmaToWmoCode(sky, pty) {
+function kmaToWmoCode(sky, pty, lightning = false) {
   const p = String(pty ?? '0');
+  if (lightning) return p !== '0' ? 95 : 95;
   if (p === '1' || p === '4') return 61;
   if (p === '2' || p === '6') return 68;
   if (p === '3' || p === '7') return 71;
   if (p === '5') return 51;
   const s = String(sky ?? '1');
   if (s === '1') return 0;
-  if (s === '3') return 2;
+  if (s === '2' || s === '3') return 2;
   if (s === '4') return 3;
   return 1;
 }
@@ -124,12 +125,14 @@ function classify(hour) {
   const snowCm = amountNumber(hour.SNO);
   const prob = hour.POP == null ? null : Number(hour.POP);
   const wet = pty !== '0' || rainMm > 0 || snowCm > 0;
+  const lightning = hour.LGT != null && Number.isFinite(Number(hour.LGT)) && Number(hour.LGT) > 0;
   const wsd = hour.WSD != null && Number.isFinite(Number(hour.WSD)) ? Number(hour.WSD) : null;
   const vec = hour.VEC != null && Number.isFinite(Number(hour.VEC)) ? Number(hour.VEC) : null;
   return {
     type: wet ? precipType(pty !== '0' ? pty : (snowCm > 0 ? '3' : '1')) : '없음',
     wet,
     pty,
+    lightning,
     chance: prob != null && Number.isFinite(prob) ? prob : null,
     risk: !wet && prob != null && prob >= 50,
     amount: hour.RN1 ?? hour.PCP ?? null,
@@ -141,8 +144,8 @@ function classify(hour) {
     vec,
     windDir: windDirKo(vec),
     sky: hour.SKY ?? null,
-    skyLabel: skyText(hour.SKY, pty),
-    weatherCode: kmaToWmoCode(hour.SKY, pty),
+    skyLabel: lightning ? (wet ? `${precipType(pty)}·번개` : '뇌우·번개') : skyText(hour.SKY, pty),
+    weatherCode: kmaToWmoCode(hour.SKY, pty, lightning),
     snow: hour.SNO ?? null,
     source: hour.__source || '단기예보'
   };
@@ -1027,6 +1030,7 @@ function buildShortTermRegionForecast({ region, now = Date.now(), shortRes = nul
       humidity: c.humidity != null && Number.isFinite(Number(c.humidity)) ? Number(c.humidity) : null,
       pop: c.chance,
       pty: c.pty,
+      lightning: !!c.lightning,
       sky: c.sky,
       skyLabel: c.skyLabel,
       type: c.type,
@@ -1176,6 +1180,35 @@ async function collectShortTerm12({ now = Date.now(), fetchShort, fetchUltra }) 
     throw new Error('12개 지역 기상청 단기예보를 불러오지 못했습니다. API 키 승인 상태를 확인하세요.');
   }
   return buildShortTerm12Payload({ now, regionResults: results });
+}
+
+function parseOverviewPlacesParam(rawPlaces = '') {
+  const s = String(rawPlaces || '').trim();
+  if (!s) {
+    return CORRIDOR_WATCHED_PLACES.map(p => ({
+      name: p.name,
+      lat: p.lat,
+      lon: p.lon,
+      key: `${Number(p.lat).toFixed(3)},${Number(p.lon).toFixed(3)}`,
+      grid: latlonToGrid(p.lat, p.lon)
+    }));
+  }
+  const out = [];
+  const seen = new Set();
+  for (const part of s.split(';')) {
+    if (out.length >= 10) break;
+    const chunks = part.split('|');
+    const coordStr = chunks.length >= 2 ? chunks.slice(-1)[0] : chunks[0];
+    const name = chunks.length >= 2 ? chunks.slice(0, -1).join('|').trim().slice(0, 40) : '';
+    const [latRaw, lonRaw] = String(coordStr || '').split(',');
+    const lat = Number(latRaw), lon = Number(lonRaw);
+    if (!Number.isFinite(lat) || !Number.isFinite(lon) || lat < 32 || lat > 39.5 || lon < 124 || lon > 132) continue;
+    const key = `${lat.toFixed(3)},${lon.toFixed(3)}`;
+    if (seen.has(key)) continue;
+    seen.add(key);
+    out.push({ name: name || key, lat, lon, key, grid: latlonToGrid(lat, lon) });
+  }
+  return out;
 }
 
 
@@ -1535,6 +1568,116 @@ async function getObservationForPlace(env, lat, lon) {
   return out;
 }
 
+async function fetchOverviewBundle(env, { placesParam = '', line = getRoadLineCode(env), roadNum = '012', force = false } = {}) {
+  const places = parseOverviewPlacesParam(placesParam);
+  if (!places.length) throw new Error('조회할 유효한 국내 좌표가 없습니다.');
+  const now = Date.now();
+  const sBase = baseShort(now);
+  const uBase = baseUltra(now);
+  const oBase = baseObservation(now);
+  const bundleKey = `bundle|${line}|${roadNum}|${places.map(p => p.key).join('|')}|${timePart(uBase)}|${timePart(sBase)}`;
+  const hit = !force ? getCached(bundleKey) : null;
+  if (hit) return hit;
+
+  return withInFlight(force ? `${bundleKey}|force` : bundleKey, async () => {
+    const [roadSettled, riskSettled, wrnSettled] = await Promise.allSettled([
+      getRoadKey(env) ? fetchRoadStations(env, line) : Promise.resolve(null),
+      getRoadKey(env) ? fetchRoadRisk(env, roadNum) : Promise.resolve(null),
+      fetchWrnNowList(env)
+    ]);
+    const roadData = roadSettled.status === 'fulfilled' ? roadSettled.value : null;
+    const roadRisk = riskSettled.status === 'fulfilled' ? riskSettled.value : null;
+    const allWarnings = wrnSettled.status === 'fulfilled' ? wrnSettled.value : [];
+    const hasSubZones = allWarnings.some(w => w.regUpKo && w.regKo !== w.regUpKo);
+    const capPolyMap = hasSubZones ? await getCapPolygonMap() : new Map();
+
+    const placeRoadMatches = new Map();
+    const gridNeedsNcst = new Set();
+    const uniqueGrids = new Map();
+    for (const p of places) {
+      const gk = `${p.grid.nx},${p.grid.ny}`;
+      if (!uniqueGrids.has(gk)) uniqueGrids.set(gk, p.grid);
+      const rm = roadData?.stations?.length ? matchRoadStation(p.lat, p.lon, roadData.stations) : null;
+      const validRm = rm && rm.distanceKm <= 28 ? rm : null;
+      placeRoadMatches.set(p.key, validRm);
+      if (!validRm || validRm.temp === null || validRm.humidity === null) {
+        gridNeedsNcst.add(gk);
+      }
+    }
+
+    const gridEntries = [...uniqueGrids.entries()];
+    const gridResults = new Map();
+    if (getServiceKey(env)) {
+      let resolvedUBase = null;
+      let ultraProbePromise = null;
+      const fetchBundleUltra = async (grid) => {
+        if (!resolvedUBase) {
+          if (!ultraProbePromise) {
+            ultraProbePromise = fetchWithFallback(env, 'getUltraSrtFcst', grid, uBase, 60).then(res => {
+              resolvedUBase = res.notice ? new Date(uBase.getTime() - 60 * 60000) : uBase;
+              return { firstKey: `${grid.nx},${grid.ny}`, res };
+            });
+          }
+          const probed = await ultraProbePromise;
+          if (probed.firstKey === `${grid.nx},${grid.ny}`) return probed.res;
+        }
+        const activeBase = resolvedUBase || uBase;
+        return { items: await fetchKma(env, 'getUltraSrtFcst', grid, activeBase, 6000), base: isoKst(activeBase) };
+      };
+
+      await Promise.allSettled(gridEntries.map(async ([gk, grid]) => {
+        const requests = await Promise.allSettled([
+          fetchBundleUltra(grid),
+          fetchWithFallback(env, 'getVilageFcst', grid, sBase, 180),
+          gridNeedsNcst.has(gk) ? fetchWithFallback(env, 'getUltraSrtNcst', grid, oBase, 60) : Promise.resolve(null)
+        ]);
+        gridResults.set(gk, requests);
+      }));
+    }
+
+    const items = {};
+    for (const p of places) {
+      const gk = `${p.grid.nx},${p.grid.ny}`;
+      const reqs = gridResults.get(gk);
+      const rm = placeRoadMatches.get(p.key) || null;
+      const ncstSettled = reqs?.[2]?.status === 'fulfilled' && reqs[2].value ? reqs[2] : null;
+      const kmaNcst = ncstSettled ? parseNcstValues(ncstSettled.value, p.grid) : null;
+      const observation = (rm || kmaNcst) ? mergeObservationResult(rm, kmaNcst) : null;
+
+      let fcst = null;
+      if (reqs && (reqs[0].status === 'fulfilled' || reqs[1].status === 'fulfilled')) {
+        try {
+          fcst = buildForecastResult(p.grid, now, [
+            reqs[0],
+            reqs[1],
+            ncstSettled || { status: 'rejected', reason: new Error('road obs matched') }
+          ]);
+        } catch {}
+      }
+
+      const matchedWrn = sortWarnings(allWarnings.filter(w => warningMatchesPlace(w, p.name, p.lat, p.lon, capPolyMap)));
+      items[p.key] = {
+        name: p.name,
+        observation,
+        forecast: fcst,
+        warnings: matchedWrn
+      };
+    }
+
+    const payload = {
+      ok: true,
+      mode: 'overview-bundle',
+      updatedAt: new Date(now).toISOString(),
+      roadLine: String(line),
+      roadStations: roadData?.stations || [],
+      roadRisk,
+      items
+    };
+    setCached(bundleKey, payload, 90000);
+    return payload;
+  });
+}
+
 async function fetchWrnNowList(env) {
   const key = getServiceKey(env);
   if (!key) return [];
@@ -1584,7 +1727,7 @@ async function getCapPolygonMap() {
   const polyMap = new Map();
   try {
     const rssXml = await fetchCapXml('');
-    const links = extractCapLinksFromRss(rssXml, 12);
+    const links = extractCapLinksFromRss(rssXml, 8);
     const docs = await Promise.allSettled(links.map(f => fetchCapXml(f)));
     for (const res of docs) {
       if (res.status === 'fulfilled') populateCapPolygons(res.value, polyMap);
@@ -1681,6 +1824,25 @@ export default {
           'Cache-Control': 'public, max-age=60, s-maxage=300, stale-while-revalidate=600'
         });
         putEdgeCache(ctx, cacheKeyReq, res);
+        return res;
+      } catch (e) {
+        return jsonResponse(request, env, 502, { error: errMessage(e) });
+      }
+    }
+
+    if (pathname === '/api/overview-bundle') {
+      if (!getServiceKey(env) && !getRoadKey(env)) {
+        return jsonResponse(request, env, 503, { code: 'KEY_MISSING', error: '운영자가 기상청 API 키를 등록하지 않았습니다.' });
+      }
+      try {
+        const line = requestUrl.searchParams.get('line') || roadLine;
+        const roadNum = requestUrl.searchParams.get('roadNum') || '012';
+        const placesParam = requestUrl.searchParams.get('places') || '';
+        const value = await fetchOverviewBundle(env, { placesParam, line, roadNum, force: isForced });
+        const res = jsonResponse(request, env, 200, value, {
+          'Cache-Control': isForced ? 'no-store' : 'public, max-age=60, s-maxage=90'
+        });
+        if (!isForced) putEdgeCache(ctx, cacheKeyReq, res);
         return res;
       } catch (e) {
         return jsonResponse(request, env, 502, { error: errMessage(e) });

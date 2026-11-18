@@ -226,6 +226,22 @@ test('Cloudflare Worker는 CORS·OPTIONS·health·도로관측(중복 Ncst 생�
     assert.equal(wrn.warnings[0].title, '한파주의보');
     assert.equal(wrn.warnings[0].regKo, '거창군남부');
 
+    // Overview bundle single-request API (8 places/subset + roadStations + roadRisk + warnings + forecast + obs)
+    const bundleUrl = 'https://bionda-api.workers.dev/api/overview-bundle?line=14&roadNum=012&places=' +
+      encodeURIComponent('거창군남부|35.644,127.910;함양중부|35.566,127.774');
+    const bdlRes = await worker.fetch(new Request(bundleUrl), env);
+    assert.equal(bdlRes.status, 200);
+    const bdl = await bdlRes.json();
+    assert.equal(bdl.ok, true);
+    assert.equal(bdl.mode, 'overview-bundle');
+    assert.ok(Array.isArray(bdl.roadStations) && bdl.roadStations.length >= 1);
+    assert.equal(bdl.roadRisk?.ok, true);
+    assert.equal(bdl.items['35.644,127.910']?.warnings?.[0]?.title, '한파주의보');
+    assert.equal(bdl.items['35.644,127.910']?.forecast?.ok, true);
+    assert.equal(bdl.items['35.566,127.774']?.observation?.roadTemp, 7.4);
+    assert.equal(bdl.items['35.566,127.774']?.observation?.temp, 6.6);
+    assert.ok(!JSON.stringify(bdl).includes('worker-secret-test-key'));
+
     // Radar binary PNG
     const rdrRes = await worker.fetch(new Request('https://bionda-api.workers.dev/api/radar'), env);
     assert.equal(rdrRes.status, 200);
