@@ -135,3 +135,38 @@ test('주야간 시각 추론 및 KMA 수치 코드 → 히어로 장면 자동 
   const overlap = idsA.filter(id => idsB.includes(id));
   assert.equal(overlap.length, 0, '다중 장면 렌더링 시 SVG ID가 겹치지 않아야 함');
 });
+
+test('buildHeroSceneInputFromRecord는 운영 상세 레코드(실황·012도로위험·CAP특보·WMO)를 정확히 매핑한다', async () => {
+  const { buildHeroSceneInputFromRecord, resolveHeroScene, renderHeroSceneMarkup } = await loadHeroModule();
+
+  // 1) 야간 맑음 + 012선 살얼음 위험(3단계) + CAP 한파경보
+  const coldDanger = buildHeroSceneInputFromRecord({
+    o: { temp: -11.2, humidity: 58, windSpeed: 2.3, pty: '0' },
+    w: { current: { code: 0, temp: -11.0, humidity: 60, wind: 2.0 }, ice: { rank: 1 }, kma: { hours: [{ sky: '1' }] } },
+    roadRisk: { iceLevel: 3, fogLevel: 0 },
+    wrn: { active: [{ kind: '한파', level: '경보', title: '한파경보' }] }
+  }, { date: new Date('2026-11-19T22:00:00+09:00') });
+  const coldScene = resolveHeroScene(coldDanger);
+  assert.equal(coldScene.weather, 'clear');
+  assert.equal(coldScene.dayPhase, 'night');
+  assert.equal(coldScene.iceRank, 3);
+  assert.equal(coldScene.coldWave, true);
+
+  // 2) CAP 태풍 특보가 없을 때 강풍만으로는 가짜 '힌남노' 이름이 나오지 않고 '강풍 경계' 배지로 표시됨
+  const galeInput = buildHeroSceneInputFromRecord({
+    o: { temp: 12.0, humidity: 88, windSpeed: 18.4, description: '비' },
+    w: { current: { code: 61, wind: 18.4 } },
+    wrn: { active: [] }
+  }, { date: new Date('2026-11-19T14:00:00+09:00') });
+  const galeHtml = renderHeroSceneMarkup(galeInput).html;
+  assert.ok(!galeHtml.includes('힌남노'));
+  assert.ok(galeHtml.includes('강풍 경계'));
+
+  // 3) 실제 CAP 태풍 특보가 발효된 경우 태풍 호수·이름 추출
+  const tyInput = buildHeroSceneInputFromRecord({
+    o: { temp: 21.0, humidity: 92, windSpeed: 26.5, description: '비' },
+    wrn: { active: [{ kind: '태풍', level: '경보', title: '태풍경보', headline: '제18호 태풍 미탁 북상' }] }
+  }, { date: new Date('2026-11-19T14:00:00+09:00') });
+  const tyHtml = renderHeroSceneMarkup(tyInput).html;
+  assert.ok(tyHtml.includes('제18호 태풍 미탁'));
+});
