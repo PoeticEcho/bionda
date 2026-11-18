@@ -276,3 +276,37 @@ test('세부 특보구역(함양서북부)은 CAP 폴리곤 좌표 기준으로 
   // 서상면(35.69, 127.66)은 서북부 폴리곤 내부 -> 매칭됨
   assert.equal(warningMatchesPlace(wSubZone, '함양서북부 테스트', 35.690, 127.660, capMap), true);
 });
+
+test('AI 브리핑 JPG 슬롯(08시·18시) 산정 및 3일(최대 6슬롯) 초과 파일 자동 정리', () => {
+  const os = require('node:os');
+  const { resolveBriefingSlot, pruneOldBriefingFiles } = require('../scripts/build-agent-briefing');
+
+  // KST 08:10 -> 0800 slot, KST 18:10 -> 1800 slot
+  const ms0810 = Date.UTC(2026, 10, 18, 8, 10, 0) - 9 * 3600000;
+  const ms1810 = Date.UTC(2026, 10, 18, 18, 10, 0) - 9 * 3600000;
+  assert.equal(resolveBriefingSlot(ms0810).filename, 'goryeong-2026-11-18-0800.jpg');
+  assert.equal(resolveBriefingSlot(ms1810).filename, 'goryeong-2026-11-18-1800.jpg');
+
+  const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'bionda-prune-'));
+  try {
+    const sampleSlots = [
+      'goryeong-2026-11-14-1800.jpg', // >3 days old -> deleted
+      'goryeong-2026-11-15-0800.jpg', // >3 days old -> deleted
+      'goryeong-2026-11-16-0800.jpg',
+      'goryeong-2026-11-16-1800.jpg',
+      'goryeong-2026-11-17-0800.jpg',
+      'goryeong-2026-11-17-1800.jpg',
+      'goryeong-2026-11-18-0800.jpg',
+      'goryeong-2026-11-18-1800.jpg'
+    ];
+    for (const f of sampleSlots) fs.writeFileSync(path.join(tmpDir, f), 'jpg');
+
+    const { kept, deleted } = pruneOldBriefingFiles(tmpDir, '2026-11-18-1800', 3, 6);
+    assert.equal(kept.length, 6);
+    assert.equal(deleted.length, 2);
+    assert.ok(deleted.includes('goryeong-2026-11-14-1800.jpg'));
+    assert.ok(deleted.includes('goryeong-2026-11-15-0800.jpg'));
+  } finally {
+    fs.rmSync(tmpDir, { recursive: true, force: true });
+  }
+});
