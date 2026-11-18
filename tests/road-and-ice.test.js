@@ -207,3 +207,56 @@ test('iceOutlook은 6시간 판단 창을 유지하며 시동ON·예비살포 st
     assert.ok(c.pcChip && c.mobChip);
   }
 });
+
+test('classifySeverityTier는 4단계(회색->노랑->주황->빨강) 색상 등급 및 현재 눈·심한비 적색 격상을 정확히 분류한다', async () => {
+  const { classifySeverityTier } = await import('../public/ice.js');
+
+  // 0: Calm -> 회색 (tier 0)
+  const tierCalm = classifySeverityTier({
+    w: { current: { code: 1, precip: 0 }, ice: { rank: 0, decisionCards: [] }, kma: { analysis: { now: { wet: false } } } },
+    o: { surfaceCode: 1, precip: 0 },
+    wrn: { count: 0 }
+  });
+  assert.equal(tierCalm.tier, 0);
+  assert.equal(tierCalm.cls, 'tier-calm');
+
+  // 1: Light rain or general advisory (without directive) -> 노랑 (tier 1)
+  const tierWatchRain = classifySeverityTier({
+    w: { current: { code: 61, precip: 1.0 }, ice: { rank: 0, decisionCards: [] }, kma: { analysis: { now: { wet: true, type: '비' } } } },
+    o: { surfaceCode: 2, precip: 1.0 },
+    wrn: { count: 0 }
+  });
+  assert.equal(tierWatchRain.tier, 1);
+  assert.equal(tierWatchRain.cls, 'tier-watch');
+
+  // 2: Preheat / Presalt watch directive attached -> 주황 (tier 2)
+  const tierDirective = classifySeverityTier({
+    w: {
+      current: { code: 3, precip: 0 },
+      ice: { rank: 1, decisionCards: [{ stageId: 'preheat', state: 'watch' }] },
+      kma: { analysis: { now: { wet: false } } }
+    },
+    o: { surfaceCode: 1, precip: 0 },
+    wrn: { count: 1, top: { kind: '한파', level: '주의보' } }
+  });
+  assert.equal(tierDirective.tier, 2);
+  assert.equal(tierDirective.cls, 'tier-directive');
+
+  // 3a: Snowing right now (even without flood/ice urgent) -> 빨강 (tier 3)
+  const tierSnowNow = classifySeverityTier({
+    w: { current: { code: 71, precip: 1.5 }, ice: { rank: 0, decisionCards: [] }, kma: { analysis: { now: { wet: true, type: '눈' } } } },
+    o: { surfaceCode: 2, precip: 1.5 },
+    wrn: { count: 0 }
+  });
+  assert.equal(tierSnowNow.tier, 3);
+  assert.equal(tierSnowNow.cls, 'tier-danger');
+
+  // 3b: Heavy rain (>=10mm/h) right now -> 빨강 (tier 3)
+  const tierHeavyRain = classifySeverityTier({
+    w: { current: { code: 65, precip: 14.0 }, ice: { rank: 0, decisionCards: [] }, kma: { analysis: { now: { wet: true, type: '비' } } } },
+    o: { surfaceCode: 3, precip: 14.0 },
+    wrn: { count: 0 }
+  });
+  assert.equal(tierHeavyRain.tier, 3);
+  assert.equal(tierHeavyRain.cls, 'tier-danger');
+});
