@@ -532,8 +532,63 @@ test('12개 읍·면·동 1시간 단기예보(SHORT_TERM_12_REGIONS), 강수·�
   assert.equal(parsedCustom[0].key, '35.644,127.910');
   assert.equal(parsedCustom[1].key, '35.566,127.774');
 
-  // hourly 정시 자동 새로고침 타이머 계산 검증
-  const { msUntilNextTopOfHour } = await import('../public/hourly.js');
+  // hourly 정시 자동 새로고침 타이머 계산 + 누락 지역 그리드/열 정렬 깨짐 방지 검증
+  const { msUntilNextTopOfHour, alignHourlyMatrix } = await import('../public/hourly.js');
   assert.equal(msUntilNextTopOfHour(Date.parse('2026-11-19T05:57:30+09:00'), 1500), 151500);
   assert.equal(msUntilNextTopOfHour(Date.parse('2026-11-19T06:00:00+09:00'), 1500), 3601500);
+
+  const aligned = alignHourlyMatrix([
+    { id: 'empty0', county: '고령군', name: '쌍림면', hours: [] },
+    { id: 'partial1', county: '함양군', name: '지곡면', hours: [
+      { time: '2026-11-19T08:00:00+09:00', hourKst: 8, dayNum: 19, dateLabel: '11-19', temp: 2 },
+      { time: '2026-11-19T09:00:00+09:00', hourKst: 9, dayNum: 19, dateLabel: '11-19', temp: 3 }
+    ] },
+    { id: 'full2', county: '함양군', name: '함양읍', hours: [
+      { time: '2026-11-19T06:00:00+09:00', hourKst: 6, dayNum: 19, dateLabel: '11-19', temp: 1 },
+      { time: '2026-11-19T07:00:00+09:00', hourKst: 7, dayNum: 19, dateLabel: '11-19', temp: 1 },
+      { time: '2026-11-19T08:00:00+09:00', hourKst: 8, dayNum: 19, dateLabel: '11-19', temp: 2 },
+      { time: '2026-11-19T09:00:00+09:00', hourKst: 9, dayNum: 19, dateLabel: '11-19', temp: 3 }
+    ] }
+  ], '12');
+  assert.equal(aligned.headerHours.length, 4);
+  assert.equal(aligned.headerHours[0].hourKst, 6);
+  assert.equal(aligned.rows[0].cells.length, 4);
+  assert.equal(aligned.rows[0].validCount, 0);
+  assert.equal(aligned.rows[0].missingCount, 4);
+  assert.equal(aligned.rows[1].cells[0], null);
+  assert.equal(aligned.rows[1].cells[1], null);
+  assert.equal(aligned.rows[1].cells[2].hourKst, 8);
+  assert.equal(aligned.rows[1].cells[3].hourKst, 9);
+
+  // collectShortTerm12 부분 실패 격자 1회 재시도 복구 및 시작 시각 일관성 검증
+  const ultraAttempts = new Map();
+  const recoveredPayload = await core.collectShortTerm12({
+    now: fixedNow,
+    fetchShort: async () => ({
+      base: '2026-11-19T02:00:00+09:00',
+      items: [4, 5, 6, 7].flatMap(h => [
+        { fcstDate: '20261119', fcstTime: `${pad2(h)}00`, category: 'TMP', fcstValue: '3' },
+        { fcstDate: '20261119', fcstTime: `${pad2(h)}00`, category: 'SKY', fcstValue: '3' },
+        { fcstDate: '20261119', fcstTime: `${pad2(h)}00`, category: 'PTY', fcstValue: '0' }
+      ])
+    }),
+    fetchUltra: async (grid) => {
+      const gk = `${grid.nx},${grid.ny}`;
+      const n = (ultraAttempts.get(gk) || 0) + 1;
+      ultraAttempts.set(gk, n);
+      if (gk === '83,86' && n === 1) throw new Error('Transient KMA timeout');
+      if (gk === '85,88') throw new Error('Persistent ultra outage');
+      return {
+        base: '2026-11-19T04:30:00+09:00',
+        items: [5, 6].flatMap(h => [
+          { fcstDate: '20261119', fcstTime: `${pad2(h)}00`, category: 'T1H', fcstValue: '4' },
+          { fcstDate: '20261119', fcstTime: `${pad2(h)}00`, category: 'SKY', fcstValue: '1' },
+          { fcstDate: '20261119', fcstTime: `${pad2(h)}00`, category: 'PTY', fcstValue: '0' }
+        ])
+      };
+    }
+  });
+  assert.equal(ultraAttempts.get('83,86'), 2);
+  assert.equal(recoveredPayload.regions.find(r => r.id === 'ssangnim').hours[0].hourKst, 5);
+  assert.equal(recoveredPayload.regions.find(r => r.id === 'seongsan').hours[0].hourKst, 5);
 });
