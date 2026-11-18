@@ -258,10 +258,10 @@ export async function fetchPlaceWarnings(place) {
   const activeByKind = new Map();
   const recentEvents = [];
 
-  // 1. Server-side KMA wrn_now_data.php endpoint (/api/warnings)
+  // 1. Server-side KMA wrn_now_data.php endpoint (/api/warnings) or static snapshot fallback
   try {
     const res = await fetch('/api/warnings?name=' + encodeURIComponent(place.name) + '&lat=' + place.lat + '&lon=' + place.lon, {
-      signal: AbortSignal.timeout(9000)
+      signal: AbortSignal.timeout(6000)
     });
     if (res.ok) {
       const data = await res.json();
@@ -280,8 +280,33 @@ export async function fetchPlaceWarnings(place) {
           priorityScore: w.priorityScore ?? calcPriorityScore(w.kind, w.level)
         });
       }
+    } else {
+      throw Error('fallback');
     }
-  } catch {}
+  } catch {
+    try {
+      const snapRes = await fetch('./api/snapshot.json', { signal: AbortSignal.timeout(5000) });
+      if (snapRes.ok) {
+        const snap = await snapRes.json();
+        const key = `${Number(place.lat).toFixed(3)},${Number(place.lon).toFixed(3)}`;
+        for (const w of snap?.warnings?.[key]?.warnings || []) {
+          activeByKind.set(w.kind, {
+            id: `${w.regId}:${w.kind}:${w.tmFc}`,
+            kind: w.kind,
+            level: w.level,
+            title: w.title,
+            cancel: false,
+            action: w.cmd || '발효',
+            sent: Date.now(),
+            effectiveText: w.effectiveText,
+            isFutureEffective: w.isFutureEffective,
+            expiresText: w.expiresText ? (w.expiresText.includes('해제') || w.expiresText.includes('발표') ? w.expiresText : `${w.expiresText} 해제예정`) : '해제시각 추후 발표',
+            priorityScore: w.priorityScore ?? calcPriorityScore(w.kind, w.level)
+          });
+        }
+      }
+    } catch {}
+  }
 
   // 2. KMA CAP RSS & XML polygon check
   try {
