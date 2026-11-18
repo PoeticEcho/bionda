@@ -346,7 +346,7 @@ async function fetchRoadRisk(env, roadNum = '012') {
         u.searchParams.set('tm', tmUtc);
         u.searchParams.set('roadNum', cleanNum);
         u.searchParams.set('authKey', deEncodedKey(key));
-        const r = await fetchWithTimeout(u.toString(), {}, 6500);
+        const r = await fetchWithTimeout(u.toString(), {}, 4500);
         if (!r.ok) continue;
         const bytes = new Uint8Array(await r.arrayBuffer());
         if (bytes.length < 22 || bytes[0] !== 0x50 || bytes[1] !== 0x4b) continue;
@@ -414,33 +414,20 @@ async function fetchOverviewBundle(env, { placesParam = '', line = getRoadLineCo
   if (hit) return hit;
 
   return withInFlight(force ? `${bundleKey}|force` : bundleKey, async () => {
-    const [roadSettled, riskSettled, wrnSettled] = await Promise.allSettled([
-      getRoadKey(env) ? fetchRoadStations(env, line, force) : Promise.resolve(null),
-      getRoadKey(env) ? fetchRoadRisk(env, roadNum) : Promise.resolve(null),
-      fetchWrnNowList(env)
-    ]);
-    const roadData = roadSettled.status === 'fulfilled' ? roadSettled.value : null;
-    const roadRisk = riskSettled.status === 'fulfilled' ? riskSettled.value : null;
-    const allWarnings = wrnSettled.status === 'fulfilled' ? wrnSettled.value : [];
-    const hasSubZones = allWarnings.some(w => w.regUpKo && w.regKo !== w.regUpKo);
-    const capPolyMap = hasSubZones ? await getCapPolygonMap() : new Map();
-
-    const placeRoadMatches = new Map();
-    const gridNeedsNcst = new Set();
     const uniqueGrids = new Map();
     for (const p of places) {
       const gk = `${p.grid.nx},${p.grid.ny}`;
       if (!uniqueGrids.has(gk)) uniqueGrids.set(gk, p.grid);
-      const rm = roadData?.stations?.length ? matchRoadStation(p.lat, p.lon, roadData.stations) : null;
-      const validRm = rm && rm.distanceKm <= 28 ? rm : null;
-      placeRoadMatches.set(p.key, validRm);
-      if (!validRm || validRm.temp === null || validRm.humidity === null) {
-        gridNeedsNcst.add(gk);
-      }
     }
-
     const gridEntries = [...uniqueGrids.entries()];
+
+    // 1) 도로관측 · 012위험 · 특보 · 격자별 단기/초단기예보를 처음부터 완전 병렬 시작 (기존 직렬 대기 제거)
+    const roadPromise = getRoadKey(env) ? fetchRoadStations(env, line, force).catch(() => null) : Promise.resolve(null);
+    const riskPromise = getRoadKey(env) ? fetchRoadRisk(env, roadNum).catch(() => null) : Promise.resolve(null);
+    const wrnPromise = fetchWrnNowList(env).catch(() => []);
+
     const gridResults = new Map();
+    let forecastPromise = Promise.resolve();
     if (getServiceKey(env)) {
       let resolvedUBase = null;
       let ultraProbePromise = null;
@@ -459,14 +446,42 @@ async function fetchOverviewBundle(env, { placesParam = '', line = getRoadLineCo
         return { items: await fetchKma(env, 'getUltraSrtFcst', grid, activeBase, 6000), base: isoKst(activeBase) };
       };
 
-      await Promise.allSettled(gridEntries.map(async ([gk, grid]) => {
+      const roadMatchGate = roadPromise.then(roadData => {
+        const placeRoadMatches = new Map();
+        const gridNeedsNcst = new Set();
+        for (const p of places) {
+          const gk = `${p.grid.nx},${p.grid.ny}`;
+          const rm = roadData?.stations?.length ? matchRoadStation(p.lat, p.lon, roadData.stations) : null;
+          const validRm = rm && rm.distanceKm <= 28 ? rm : null;
+          placeRoadMatches.set(p.key, validRm);
+          if (!validRm || validRm.temp === null || validRm.humidity === null) {
+            gridNeedsNcst.add(gk);
+          }
+        }
+        return { roadData, placeRoadMatches, gridNeedsNcst };
+      });
+
+      forecastPromise = Promise.allSettled(gridEntries.map(async ([gk, grid]) => {
+        const ncstPromise = roadMatchGate.then(({ gridNeedsNcst }) =>
+          gridNeedsNcst.has(gk) ? fetchWithFallback(env, 'getUltraSrtNcst', grid, oBase, 60) : null
+        );
         const requests = await Promise.allSettled([
           fetchBundleUltra(grid),
           fetchWithFallback(env, 'getVilageFcst', grid, sBase, 180),
-          gridNeedsNcst.has(gk) ? fetchWithFallback(env, 'getUltraSrtNcst', grid, oBase, 60) : Promise.resolve(null)
+          ncstPromise
         ]);
         gridResults.set(gk, requests);
       }));
+    }
+
+    const [roadData, roadRisk, allWarnings] = await Promise.all([roadPromise, riskPromise, wrnPromise, forecastPromise]);
+    const hasSubZones = allWarnings.some(w => w.regUpKo && w.regKo !== w.regUpKo);
+    const capPolyMap = hasSubZones ? await getCapPolygonMap() : new Map();
+
+    const placeRoadMatches = new Map();
+    for (const p of places) {
+      const rm = roadData?.stations?.length ? matchRoadStation(p.lat, p.lon, roadData.stations) : null;
+      placeRoadMatches.set(p.key, rm && rm.distanceKm <= 28 ? rm : null);
     }
 
     const items = {};
