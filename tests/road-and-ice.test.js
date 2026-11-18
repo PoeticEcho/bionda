@@ -2,7 +2,7 @@ const { test } = require('node:test');
 const assert = require('node:assert/strict');
 const fs = require('node:fs');
 const path = require('node:path');
-const { parseRoadStations, matchRoadStation, parseWrnNow, sortWarnings } = require('../server');
+const { parseRoadStations, matchRoadStation, parseWrnNow, sortWarnings, analyze } = require('../server');
 
 test('광주대구선(14번) 도로기상관측 매분자료 파싱 및 8개 관심지역 최근접 매칭', () => {
   const sampleRaw = [
@@ -83,6 +83,40 @@ test('도로 살얼음 판정 (야간 교량 복사냉각, 잔설 재결빙, 3�
   assert.ok(outlook.snowActions.some(a => a.stage === 'chemical'));
   assert.equal(outlook.windAlert.active, true);
   assert.equal(outlook.windAlert.maxWind, 11.5);
+  // 구조화된 결빙 지표 6개 및 지시 카드 4개(제설차 시동 ON, 예비살포, 본살포, 수방·횡풍) 검증
+  assert.equal(outlook.conditionMetrics.length, 6);
+  assert.equal(outlook.decisionCards.length, 4);
+  assert.equal(outlook.decisionCards[0].title, '제설차 시동 ON');
+  assert.equal(outlook.decisionCards[0].subtitle, '(살포기 유압 예열)');
+  assert.equal(outlook.decisionCards[1].title, '예비살포');
+  assert.equal(outlook.decisionCards[2].title, '본살포');
+});
+
+test('19:00 ~ 06:00 12시간 전 구간 강수 시 시작·지속 분석 결과 검증', () => {
+  const base = Date.parse('2026-11-18T18:00:00+09:00');
+  const hours = Array.from({ length: 12 }, (_, i) => ({
+    offset: i + 1,
+    wet: true,
+    risk: false,
+    type: '비',
+    chance: 80,
+    time: new Date(base + (i + 1) * 3600000 + 9 * 3600000).toISOString().replace('Z', '+09:00').slice(0, 19) + '+09:00'
+  }));
+  // Construct exact KST ISO strings 19:00 .. 06:00
+  const kstHours = Array.from({ length: 12 }, (_, i) => {
+    const d = new Date(base + (i + 1) * 3600000 + 9 * 3600000);
+    const pad = x => String(x).padStart(2, '0');
+    const t = `${d.getUTCFullYear()}-${pad(d.getUTCMonth() + 1)}-${pad(d.getUTCDate())}T${pad(d.getUTCHours())}:00:00+09:00`;
+    return { offset: i + 1, wet: true, risk: false, type: '비', chance: 80, time: t };
+  });
+  const a = analyze(kstHours, { wet: false });
+  assert.equal(a.windowHours, 12);
+  assert.equal(a.allWindowWet, true);
+  assert.equal(a.extendsBeyondWindow, true);
+  assert.equal(a.end, null);
+  assert.equal(a.start.time.slice(11, 16), '19:00');
+  assert.equal(a.lastWetTime.slice(11, 16), '06:00');
+  assert.equal(a.windowEndTime.slice(11, 16), '06:00');
 });
 
 test('스냅샷 및 공개 파일에 API 키 평문이 절대 포함되지 않는다', () => {

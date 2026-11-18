@@ -251,6 +251,18 @@ function analyze(hourly, observed) {
       if (!wet[i] && !wet[i + 1] && wet[i + 1] !== undefined) { endIndex = i; break; }
     }
   }
+  const wetIndices = wet.reduce((acc, v, idx) => (v ? [...acc, idx] : acc), []);
+  const lastWetIndex = wetIndices.length ? wetIndices.at(-1) : -1;
+  const windowEndTime = hourly.length ? hourly.at(-1).time : null;
+  const allWindowWet = hourly.length > 0 && wet.every(Boolean);
+
+  let secondStartIndex = -1;
+  if (endIndex != null) {
+    for (let i = endIndex + 1; i < wet.length; i++) {
+      if (wet[i]) { secondStartIndex = i; break; }
+    }
+  }
+
   const makeHorizon = n => {
     const block = hourly.filter(h => h.offset <= n);
     const possibilities = block.filter(h => h.wet || h.risk);
@@ -265,6 +277,12 @@ function analyze(hourly, observed) {
   };
   return {
     now: observed,
+    windowHours: hourly.length,
+    windowEndTime,
+    wetHoursCount: wetIndices.length,
+    allWindowWet,
+    lastWetTime: lastWetIndex >= 0 ? hourly[lastWetIndex].time : null,
+    secondStartTime: secondStartIndex >= 0 ? hourly[secondStartIndex].time : null,
     start: startIndex >= 0 ? { time: hourly[startIndex].time, current: !!observed?.wet && startIndex === 0 } : null,
     end: endIndex != null ? { time: hourly[endIndex].time, rule: '연속 2시간 무강수 예보' } : null,
     extendsBeyondWindow: startIndex >= 0 && endIndex == null,
