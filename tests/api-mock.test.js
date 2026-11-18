@@ -1,7 +1,7 @@
 const {test}=require('node:test');
 const assert=require('node:assert/strict');
 process.env.KMA_SERVICE_KEY='dummy-do-not-expose';
-const {forecast}=require('../server');
+const {forecast,getObservationForPlace,server}=require('../server');
 const pad=x=>String(x).padStart(2,'0');
 const nowKst=new Date(Date.now()+9*3600000);nowKst.setUTCMinutes(0,0,0);
 function item(date,i,category,fcstValue){return {fcstDate:`${date.getUTCFullYear()}${pad(date.getUTCMonth()+1)}${pad(date.getUTCDate())}`,fcstTime:`${pad(date.getUTCHours())}00`,category,fcstValue};}
@@ -38,4 +38,51 @@ test('서버 프록시의 실황·초단기·단기 병합과 종료 분석은 �
     assert.ok(!JSON.stringify(result).includes('dummy-do-not-expose'));
     assert.ok(!JSON.stringify(result).includes('serviceKey'));
   } finally { global.fetch=before; }
+});
+
+test('도로기상관측 정상 매칭 시 중복 getUltraSrtNcst 호출을 생략하고 CORS/OPTIONS가 동작한다', async () => {
+  const before = global.fetch;
+  const hitUrls = [];
+  const rawRoad = [
+    '#START7777',
+    ' 202611182150, 14207, RoadStn12, Route12, Base, 35.5660, 127.7740, 220, 1, 8.2, 48448, 72.0, 0.0, 0.0, 6.5, 210.0, 2.1, 220.0, 3.0, 1015, -999, -999, -999, -999',
+    '#7777END'
+  ].join('\n');
+  global.fetch = async input => {
+    const u = String(input);
+    hitUrls.push(u);
+    if (u.includes('road_stn_obs.php')) {
+      return { ok: true, status: 200, arrayBuffer: async () => Buffer.from(rawRoad, 'utf8') };
+    }
+    throw new Error('unexpected ncst call: ' + u);
+  };
+  try {
+    const obs = await getObservationForPlace(35.566, 127.774);
+    assert.equal(obs.name, 'RoadStn12');
+    assert.equal(obs.temp, 6.5);
+    assert.equal(obs.roadTemp, 8.2);
+    assert.equal(hitUrls.filter(u => u.includes('road_stn_obs.php')).length, 1);
+    assert.equal(hitUrls.filter(u => u.includes('getUltraSrtNcst')).length, 0);
+  } finally {
+    global.fetch = before;
+  }
+
+  await new Promise(r => server.listen(0, '127.0.0.1', r));
+  try {
+    const port = server.address().port;
+    const optRes = await fetch(`http://127.0.0.1:${port}/api/health`, {
+      method: 'OPTIONS',
+      headers: { Origin: 'https://poeticecho.github.io' }
+    });
+    assert.equal(optRes.status, 204);
+    assert.equal(optRes.headers.get('access-control-allow-origin'), '*');
+
+    const healthRes = await fetch(`http://127.0.0.1:${port}/api/health`, {
+      headers: { Origin: 'https://poeticecho.github.io' }
+    });
+    assert.equal(healthRes.status, 200);
+    assert.equal(healthRes.headers.get('access-control-allow-origin'), '*');
+  } finally {
+    await new Promise(r => server.close(r));
+  }
 });

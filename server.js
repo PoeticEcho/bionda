@@ -43,6 +43,7 @@ function getRoadKey() {
 }
 
 const SHARED_CACHE = new Map();
+const INFLIGHT = new Map();
 const REQUESTS = new Map();
 
 const pad = (n) => String(n).padStart(2, '0');
@@ -82,6 +83,18 @@ function setCached(key, value, ms) {
   }
   SHARED_CACHE.set(key, { value, expires: Date.now() + ms });
 }
+function withInFlight(key, loader) {
+  if (INFLIGHT.has(key)) return INFLIGHT.get(key);
+  const p = Promise.resolve().then(loader).finally(() => {
+    INFLIGHT.delete(key);
+  });
+  INFLIGHT.set(key, p);
+  return p;
+}
+function getClientIp(req) {
+  const fwd = String(req.headers['x-forwarded-for'] || '').split(',')[0].trim();
+  return fwd || req.socket.remoteAddress || 'unknown';
+}
 function allow(ip) {
   const now = Date.now();
   const hit = REQUESTS.get(ip) || { t: now, n: 0 };
@@ -90,6 +103,22 @@ function allow(ip) {
   REQUESTS.set(ip, hit);
   if (REQUESTS.size > 5000) REQUESTS.clear();
   return hit.n <= 180;
+}
+function applyApiCors(req, res) {
+  const allowList = String(process.env.CORS_ORIGINS || '')
+    .split(',')
+    .map(s => s.trim())
+    .filter(Boolean);
+  const reqOrigin = req.headers.origin;
+  if (!allowList.length) {
+    res.setHeader('Access-Control-Allow-Origin', '*');
+  } else if (reqOrigin && allowList.includes(reqOrigin)) {
+    res.setHeader('Access-Control-Allow-Origin', reqOrigin);
+    res.setHeader('Vary', 'Origin');
+  }
+  res.setHeader('Access-Control-Allow-Methods', 'GET, HEAD, OPTIONS');
+  res.setHeader('Access-Control-Allow-Headers', 'Content-Type');
+  res.setHeader('Access-Control-Max-Age', '600');
 }
 function sendJson(res, code, value, extra = {}) {
   res.writeHead(code, { 'Content-Type': 'application/json; charset=utf-8', 'Cache-Control': 'no-store', ...extra });
@@ -132,22 +161,24 @@ async function fetchKma(resource, grid, base, timeout = 7500) {
   const hit = getCached(cacheKey);
   if (hit) return hit;
 
-  const isApiHubKey = /^[A-Za-z0-9_-]{20,26}$/.test(apiKey.trim()) && !apiKey.includes('dummy');
-  const bases = isApiHubKey
-    ? [APIHUB_FCST_BASE, DATA_GO_KR_BASE]
-    : [DATA_GO_KR_BASE, APIHUB_FCST_BASE];
+  return withInFlight(cacheKey, async () => {
+    const isApiHubKey = /^[A-Za-z0-9_-]{20,26}$/.test(apiKey.trim()) && !apiKey.includes('dummy');
+    const bases = isApiHubKey
+      ? [APIHUB_FCST_BASE, DATA_GO_KR_BASE]
+      : [DATA_GO_KR_BASE, APIHUB_FCST_BASE];
 
-  let lastErr;
-  for (const baseUrl of bases) {
-    try {
-      const items = await fetchKmaFromBase(baseUrl, resource, grid, base, apiKey, timeout);
-      setCached(cacheKey, items, 12 * 60000);
-      return items;
-    } catch (e) {
-      lastErr = e;
+    let lastErr;
+    for (const baseUrl of bases) {
+      try {
+        const items = await fetchKmaFromBase(baseUrl, resource, grid, base, apiKey, timeout);
+        setCached(cacheKey, items, 12 * 60000);
+        return items;
+      } catch (e) {
+        lastErr = e;
+      }
     }
-  }
-  throw lastErr;
+    throw lastErr;
+  });
 }
 
 async function fetchWithFallback(resource, grid, base, prevMinutes) {
@@ -518,40 +549,42 @@ async function fetchRoadStations(line = ROAD_LINE_CODE) {
   const hit = getCached(cacheKey);
   if (hit) return hit;
 
-  const now = Date.now();
-  // Try 2, 4, and 8 minutes ago in KST so current-minute ingestion delay never yields -999
-  const offsetsMinutes = [2, 4, 8];
-  let lastStations = [];
-  for (const off of offsetsMinutes) {
-    const d = kst(now - off * 60000);
-    const tm1 = datePart(d) + timePart(d);
-    const u = new URL('https://apihub.kma.go.kr/api/typ01/url/road_stn_obs.php');
-    u.searchParams.set('mode', '2');
-    u.searchParams.set('tm1', tm1);
-    u.searchParams.set('var', String(line));
-    u.searchParams.set('disp', '1');
-    u.searchParams.set('help', '2');
-    u.searchParams.set('authKey', deEncodedKey(key));
-    const r = await fetch(u, { signal: AbortSignal.timeout(10000) });
-    if (!r.ok) continue;
-    const buf = Buffer.from(await r.arrayBuffer());
-    const text = new TextDecoder('euc-kr').decode(buf);
-    const parsed = parseRoadStations(text);
-    if (parsed.length) {
-      lastStations = parsed;
-      if (parsed.some(s => s.temp !== null || s.roadTemp !== null)) {
-        const result = { ok: true, line: String(line), tm1, updatedAt: new Date().toISOString(), stations: parsed };
-        setCached(cacheKey, result, 2 * 60000);
-        return result;
+  return withInFlight(cacheKey, async () => {
+    const now = Date.now();
+    // Try 2, 4, and 8 minutes ago in KST so current-minute ingestion delay never yields -999
+    const offsetsMinutes = [2, 4, 8];
+    let lastStations = [];
+    for (const off of offsetsMinutes) {
+      const d = kst(now - off * 60000);
+      const tm1 = datePart(d) + timePart(d);
+      const u = new URL('https://apihub.kma.go.kr/api/typ01/url/road_stn_obs.php');
+      u.searchParams.set('mode', '2');
+      u.searchParams.set('tm1', tm1);
+      u.searchParams.set('var', String(line));
+      u.searchParams.set('disp', '1');
+      u.searchParams.set('help', '2');
+      u.searchParams.set('authKey', deEncodedKey(key));
+      const r = await fetch(u, { signal: AbortSignal.timeout(10000) });
+      if (!r.ok) continue;
+      const buf = Buffer.from(await r.arrayBuffer());
+      const text = new TextDecoder('euc-kr').decode(buf);
+      const parsed = parseRoadStations(text);
+      if (parsed.length) {
+        lastStations = parsed;
+        if (parsed.some(s => s.temp !== null || s.roadTemp !== null)) {
+          const result = { ok: true, line: String(line), tm1, updatedAt: new Date().toISOString(), stations: parsed };
+          setCached(cacheKey, result, 2 * 60000);
+          return result;
+        }
       }
     }
-  }
-  if (lastStations.length) {
-    const result = { ok: true, line: String(line), updatedAt: new Date().toISOString(), stations: lastStations };
-    setCached(cacheKey, result, 60000);
-    return result;
-  }
-  throw new Error('도로기상관측 자료를 가져오지 못했습니다.');
+    if (lastStations.length) {
+      const result = { ok: true, line: String(line), updatedAt: new Date().toISOString(), stations: lastStations };
+      setCached(cacheKey, result, 60000);
+      return result;
+    }
+    throw new Error('도로기상관측 자료를 가져오지 못했습니다.');
+  });
 }
 
 async function getObservationForPlace(lat, lon) {
@@ -567,24 +600,33 @@ async function getObservationForPlace(lat, lon) {
   } catch {}
 
   let kmaNcst = null;
+  const needsNcstFallback = !roadMatch || roadMatch.temp === null || roadMatch.humidity === null;
   try {
     const grid = latlonToGrid(lat, lon);
-    const res = await fetchWithFallback('getUltraSrtNcst', grid, baseObservation(Date.now()), 60);
-    const vals = {};
-    for (const o of res.items || []) vals[o.category] = o.obsrValue;
-    const pty = String(vals.PTY || '0');
-    kmaNcst = {
-      name: `기상청 격자(${grid.nx},${grid.ny})`,
-      distanceKm: 0,
-      time: res.base,
-      temp: vals.T1H != null ? Number(vals.T1H) : null,
-      humidity: vals.REH != null ? Number(vals.REH) : null,
-      dayPrecip: vals.RN1 != null ? amountNumber(vals.RN1) : null,
-      windSpeed: vals.WSD != null ? Number(vals.WSD) : null,
-      pty,
-      description: pty !== '0' ? precipType(pty) : null,
-      source: '기상청 초단기실황'
-    };
+    const ncstBase = baseObservation(Date.now());
+    const cachedNcstItems = getCached(`kma|getUltraSrtNcst|${grid.nx}|${grid.ny}|${datePart(ncstBase)}|${timePart(ncstBase)}`);
+    const res = cachedNcstItems
+      ? { items: cachedNcstItems, base: isoKst(ncstBase) }
+      : needsNcstFallback
+        ? await fetchWithFallback('getUltraSrtNcst', grid, ncstBase, 60)
+        : null;
+    if (res) {
+      const vals = {};
+      for (const o of res.items || []) vals[o.category] = o.obsrValue;
+      const pty = String(vals.PTY || '0');
+      kmaNcst = {
+        name: `기상청 격자(${grid.nx},${grid.ny})`,
+        distanceKm: 0,
+        time: res.base,
+        temp: vals.T1H != null ? Number(vals.T1H) : null,
+        humidity: vals.REH != null ? Number(vals.REH) : null,
+        dayPrecip: vals.RN1 != null ? amountNumber(vals.RN1) : null,
+        windSpeed: vals.WSD != null ? Number(vals.WSD) : null,
+        pty,
+        description: pty !== '0' ? precipType(pty) : null,
+        source: '기상청 초단기실황'
+      };
+    }
   } catch {}
 
   if (!roadMatch && !kmaNcst) throw new Error('기상청 실황 관측 자료를 불러오지 못했습니다.');
@@ -720,19 +762,21 @@ async function fetchWrnNowList() {
   const cacheKey = 'kma-wrn-now';
   const hit = getCached(cacheKey);
   if (hit) return hit;
-  const u = new URL('https://apihub.kma.go.kr/api/typ01/url/wrn_now_data.php');
-  u.searchParams.set('fe', 'f');
-  u.searchParams.set('tm', '');
-  u.searchParams.set('disp', '0');
-  u.searchParams.set('help', '2');
-  u.searchParams.set('authKey', deEncodedKey(key));
-  const r = await fetch(u, { signal: AbortSignal.timeout(9000) });
-  if (!r.ok) return [];
-  const buf = Buffer.from(await r.arrayBuffer());
-  const text = new TextDecoder('euc-kr').decode(buf);
-  const parsed = parseWrnNow(text);
-  setCached(cacheKey, parsed, 60000);
-  return parsed;
+  return withInFlight(cacheKey, async () => {
+    const u = new URL('https://apihub.kma.go.kr/api/typ01/url/wrn_now_data.php');
+    u.searchParams.set('fe', 'f');
+    u.searchParams.set('tm', '');
+    u.searchParams.set('disp', '0');
+    u.searchParams.set('help', '2');
+    u.searchParams.set('authKey', deEncodedKey(key));
+    const r = await fetch(u, { signal: AbortSignal.timeout(9000) });
+    if (!r.ok) return [];
+    const buf = Buffer.from(await r.arrayBuffer());
+    const text = new TextDecoder('euc-kr').decode(buf);
+    const parsed = parseWrnNow(text);
+    setCached(cacheKey, parsed, 60000);
+    return parsed;
+  });
 }
 
 async function fetchCapXml(file = '') {
@@ -880,12 +924,22 @@ const server = http.createServer(async (req, res) => {
     'Content-Security-Policy',
     "default-src 'self'; img-src 'self' data: blob: https://*.weather.go.kr; style-src 'self' 'unsafe-inline'; script-src 'self'; connect-src 'self' https://api.open-meteo.com https://ensemble-api.open-meteo.com https://geocoding-api.open-meteo.com https://www.weather.go.kr; frame-src https://embed.windy.com https://*.windy.com; base-uri 'self'; form-action 'self'; frame-ancestors 'none'"
   );
-  if (req.method !== 'GET') return sendJson(res, 405, { error: '허용되지 않는 요청' });
+  if (req.method === 'OPTIONS') {
+    const requestUrl = new URL(req.url, 'http://localhost');
+    if (requestUrl.pathname.startsWith('/api/')) {
+      applyApiCors(req, res);
+      res.writeHead(204);
+      return res.end();
+    }
+    return sendJson(res, 405, { error: '허용되지 않는 요청' });
+  }
+  if (req.method !== 'GET' && req.method !== 'HEAD') return sendJson(res, 405, { error: '허용되지 않는 요청' });
   const requestUrl = new URL(req.url, 'http://localhost');
   const pathname = requestUrl.pathname;
 
   if (pathname.startsWith('/api/')) {
-    const ip = req.socket.remoteAddress || 'unknown';
+    applyApiCors(req, res);
+    const ip = getClientIp(req);
     if (!allow(ip)) return sendJson(res, 429, { error: '요청이 너무 많습니다. 잠시 후 다시 이용해 주세요.' });
 
     if (pathname === '/api/health') {
@@ -973,16 +1027,26 @@ const server = http.createServer(async (req, res) => {
         if (k !== 'endpoint') upstream.searchParams.set(k, v);
       }
       const cacheKey = `om|${upstream.toString()}`;
+      const maxAge = endpoint === 'ensemble' ? 1800 : 180;
+      const ttlMs = endpoint === 'ensemble' ? 30 * 60000 : 4 * 60000;
       const hit = getCached(cacheKey);
-      if (hit) return sendJson(res, 200, hit, { 'Cache-Control': 'public, max-age=180' });
+      if (hit) return sendJson(res, 200, hit, { 'Cache-Control': `public, max-age=${maxAge}` });
       try {
-        const r = await fetch(upstream, { signal: AbortSignal.timeout(12000) });
-        if (!r.ok) throw new Error(`Open-Meteo HTTP ${r.status}`);
-        const data = await r.json();
-        setCached(cacheKey, data, 4 * 60000);
-        return sendJson(res, 200, data, { 'Cache-Control': 'public, max-age=180' });
+        const data = await withInFlight(cacheKey, async () => {
+          const r = await fetch(upstream, { signal: AbortSignal.timeout(12000) });
+          if (r.status === 429) {
+            const err = new Error('Open-Meteo 요청 한도 초과(429)');
+            err.status = 429;
+            throw err;
+          }
+          if (!r.ok) throw new Error(`Open-Meteo HTTP ${r.status}`);
+          const parsed = await r.json();
+          setCached(cacheKey, parsed, ttlMs);
+          return parsed;
+        });
+        return sendJson(res, 200, data, { 'Cache-Control': `public, max-age=${maxAge}` });
       } catch (e) {
-        return sendJson(res, 502, { error: errMessage(e) });
+        return sendJson(res, e?.status === 429 ? 429 : 502, { error: errMessage(e) });
       }
     }
 
@@ -1032,6 +1096,7 @@ module.exports = {
   analyze,
   grouped,
   forecast,
+  getObservationForPlace,
   parseRoadStations,
   matchRoadStation,
   parseWrnNow,

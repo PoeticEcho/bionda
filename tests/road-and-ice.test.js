@@ -310,3 +310,76 @@ test('AI 브리핑 JPG 슬롯(08시·18시) 산정 및 3일(최대 6슬롯) 초�
     fs.rmSync(tmpDir, { recursive: true, force: true });
   }
 });
+
+test('Open-Meteo 다중좌표 일괄 조회(1회 forecast + 1회 ensemble) 및 API Base 보안 검증', async () => {
+  const { sanitizeApiBase } = await import('../public/config.js');
+  assert.equal(sanitizeApiBase('https://bionda-api.onrender.com/'), 'https://bionda-api.onrender.com');
+  assert.equal(sanitizeApiBase('http://localhost:3000/'), 'http://localhost:3000');
+  assert.equal(sanitizeApiBase('http://evil.example.com'), '');
+  assert.equal(sanitizeApiBase('javascript:alert(1)'), '');
+
+  const { prefetchOpenMeteo, loadWeather, loadProbabilities } = await import('../public/weather.js');
+  const samplePlaces = [
+    { name: '대구 달성군남부', lat: 35.697, lon: 128.447 },
+    { name: '함양중부', lat: 35.566, lon: 127.774 },
+    { name: '고령군', lat: 35.728, lon: 128.263 }
+  ];
+  const nowKst = new Date(Date.now() + 9 * 3600000);
+  nowKst.setUTCMinutes(0, 0, 0);
+  const times = Array.from({ length: 48 }, (_, i) => new Date(nowKst.getTime() + (i - 23) * 3600000).toISOString().slice(0, 16));
+  const currentStr = nowKst.toISOString().slice(0, 16);
+
+  const beforeFetch = global.fetch;
+  const calls = [];
+  global.fetch = async (input) => {
+    const url = String(input);
+    calls.push(url);
+    if (url.includes('/api/health') || url.includes('/api/forecast') || url.includes('snapshot.json')) {
+      return { ok: false, status: 404, json: async () => ({}) };
+    }
+    if (url.includes('api.open-meteo.com/v1/forecast')) {
+      const payload = samplePlaces.map((_, idx) => ({
+        current: { time: currentStr, interval: 900, temperature_2m: 5 + idx, relative_humidity_2m: 70, weather_code: 1, precipitation: 0, wind_speed_10m: 7.2 },
+        hourly: {
+          time: times,
+          temperature_2m: times.map(() => 5 + idx),
+          relative_humidity_2m: times.map(() => 70),
+          weather_code: times.map(() => 1),
+          precipitation: times.map(() => 0),
+          wind_speed_10m: times.map(() => 7.2),
+          precipitation_probability: times.map(() => 10),
+          rain: times.map(() => 0),
+          showers: times.map(() => 0),
+          snowfall: times.map(() => 0)
+        }
+      }));
+      return { ok: true, status: 200, json: async () => payload };
+    }
+    if (url.includes('ensemble-api.open-meteo.com/v1/ensemble')) {
+      const payload = samplePlaces.map(() => ({
+        hourly: {
+          time: times.slice(24, 32),
+          ...Object.fromEntries(Array.from({ length: 12 }, (_, m) => [`rain_member0${m}`, Array(8).fill(0)])),
+          ...Object.fromEntries(Array.from({ length: 12 }, (_, m) => [`snowfall_member0${m}`, Array(8).fill(0)]))
+        }
+      }));
+      return { ok: true, status: 200, json: async () => payload };
+    }
+    return { ok: false, status: 404, json: async () => ({}) };
+  };
+
+  try {
+    await prefetchOpenMeteo(samplePlaces, { force: true });
+    for (const p of samplePlaces) {
+      const w = await loadWeather(p, null);
+      await loadProbabilities(p, w.rows);
+      assert.equal(w.rows.length, 6);
+    }
+    const omFcstCalls = calls.filter(u => u.includes('api.open-meteo.com/v1/forecast'));
+    const omEnsCalls = calls.filter(u => u.includes('ensemble-api.open-meteo.com/v1/ensemble'));
+    assert.equal(omFcstCalls.length, 1);
+    assert.equal(omEnsCalls.length, 1);
+  } finally {
+    global.fetch = beforeFetch;
+  }
+});
