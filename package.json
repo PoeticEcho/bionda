@@ -1,0 +1,15 @@
+{
+  "name": "rainwatch-korea",
+  "version": "1.0.0",
+  "private": true,
+  "description": "비온다? × 날씨봇 — 광주대구선(14번) 8지역 비·눈 시작/종료·도로살얼음·제설·수방 상시 감시 모니터",
+  "engines": {
+    "node": ">=20"
+  },
+  "scripts": {
+    "start": "node server.js",
+    "dev": "node --use-system-ca --env-file-if-exists=.env server.js",
+    "snapshot": "node --use-system-ca --env-file-if-exists=.env scripts/build-static-snapshot.js",
+    "test": "node --use-system-ca --test tests/*.test.js"
+  }
+}

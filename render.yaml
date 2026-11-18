@@ -1,0 +1,19 @@
+services:
+  - type: web
+    name: bionda-road-weather
+    runtime: node
+    plan: free
+    buildCommand: npm install
+    startCommand: npm start
+    healthCheckPath: /api/health
+    envVars:
+      - key: NODE_ENV
+        value: production
+      - key: ROAD_LINE_CODE
+        value: "14"
+      - key: KMA_SERVICE_KEY
+        sync: false
+      - key: KMA_RADAR_KEY
+        sync: false
+      - key: KMA_ROAD_KEY
+        sync: false
