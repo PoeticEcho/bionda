@@ -26,8 +26,15 @@ async function main() {
   const outDir = path.join(__dirname, '..', 'public', 'api');
   await fs.mkdir(outDir, { recursive: true });
 
-  const roadRes = await fetch(`${base}/api/road-obs?line=14`);
+  const [roadRes, roadRiskRes] = await Promise.all([
+    fetch(`${base}/api/road-obs?line=14`),
+    fetch(`${base}/api/road-risk?roadNum=012`)
+  ]);
   const roadData = roadRes.ok ? await roadRes.json() : { stations: [] };
+  const roadRisk = roadRiskRes.ok ? await roadRiskRes.json() : null;
+  if (roadRisk?.ok) {
+    console.log(`[검증완료] 고속국도 012호선 도로위험기상(FRG/FOG) ${roadRisk.tmKst?.slice(11, 16) || roadRisk.tmUtc} 기준 · 최고 살얼음=${roadRisk.corridorSummary?.iceLabel}(${roadRisk.corridorSummary?.maxIce}단계)`);
+  }
 
   const observations = {};
   const forecasts = {};
@@ -61,6 +68,7 @@ async function main() {
     generatedAt: new Date().toISOString(),
     roadLine: '14',
     roadStations: roadData.stations || [],
+    roadRisk,
     observations,
     forecasts,
     warnings

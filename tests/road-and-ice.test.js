@@ -383,3 +383,35 @@ test('Open-Meteo 다중좌표 일괄 조회(1회 forecast + 1회 ensemble) 및 A
     global.fetch = beforeFetch;
   }
 });
+
+test('무안광주대구선(012) 위험수준 격상 판정(0→2, 0→3, 1→2, 1→3, 2→3), 3단계 등급 분류 및 기본 Worker URL을 검증한다', async () => {
+  const { isRoadRiskEscalated, classifySeverityTier } = await import('../public/ice.js');
+  // 요청된 5가지 격상 조건만 true
+  assert.equal(isRoadRiskEscalated(0, 2), true);
+  assert.equal(isRoadRiskEscalated(0, 3), true);
+  assert.equal(isRoadRiskEscalated(1, 2), true);
+  assert.equal(isRoadRiskEscalated(1, 3), true);
+  assert.equal(isRoadRiskEscalated(2, 3), true);
+  // 비격상 / 유지 / 하강 / 0→1은 false
+  assert.equal(isRoadRiskEscalated(0, 1), false);
+  assert.equal(isRoadRiskEscalated(1, 1), false);
+  assert.equal(isRoadRiskEscalated(2, 2), false);
+  assert.equal(isRoadRiskEscalated(2, 1), false);
+  assert.equal(isRoadRiskEscalated(3, 2), false);
+  assert.equal(isRoadRiskEscalated(3, 0), false);
+
+  assert.equal(classifySeverityTier({ roadRisk: { iceLevel: 1, fogLevel: 0 } }).tier, 1);
+  assert.equal(classifySeverityTier({ roadRisk: { iceLevel: 2, fogLevel: 0 } }).tier, 2);
+  assert.equal(classifySeverityTier({ roadRisk: { iceLevel: 3, fogLevel: 0 } }).tier, 3);
+  assert.equal(classifySeverityTier({ roadRisk: { iceLevel: 0, fogLevel: 3 } }).tier, 3);
+
+  const { DEFAULT_API_BASE, getApiBase } = await import('../public/config.js');
+  assert.equal(DEFAULT_API_BASE, 'https://bionda-api.herego.workers.dev');
+  const prevWin = global.window;
+  global.window = { location: { hostname: 'poeticecho.github.io', protocol: 'https:' } };
+  try {
+    assert.equal(getApiBase(), 'https://bionda-api.herego.workers.dev');
+  } finally {
+    global.window = prevWin;
+  }
+});

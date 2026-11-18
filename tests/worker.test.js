@@ -1,8 +1,51 @@
 const { test } = require('node:test');
 const assert = require('node:assert/strict');
 const { execFileSync } = require('node:child_process');
+const zlib = require('node:zlib');
 const path = require('node:path');
 const { pathToFileURL } = require('node:url');
+
+function makeTestZip(entries) {
+  const locals = [];
+  const cds = [];
+  let offset = 0;
+  for (const { name, content, deflate = false } of entries) {
+    const nameBuf = Buffer.from(name, 'utf8');
+    const raw = Buffer.from(content, 'utf8');
+    const comp = deflate ? zlib.deflateRawSync(raw) : raw;
+    const method = deflate ? 8 : 0;
+
+    const lfh = Buffer.alloc(30);
+    lfh.writeUInt32LE(0x04034b50, 0);
+    lfh.writeUInt16LE(20, 4);
+    lfh.writeUInt16LE(method, 8);
+    lfh.writeUInt32LE(comp.length, 18);
+    lfh.writeUInt32LE(raw.length, 22);
+    lfh.writeUInt16LE(nameBuf.length, 26);
+
+    const cdh = Buffer.alloc(46);
+    cdh.writeUInt32LE(0x02014b50, 0);
+    cdh.writeUInt16LE(20, 4);
+    cdh.writeUInt16LE(20, 6);
+    cdh.writeUInt16LE(method, 10);
+    cdh.writeUInt32LE(comp.length, 20);
+    cdh.writeUInt32LE(raw.length, 24);
+    cdh.writeUInt16LE(nameBuf.length, 28);
+    cdh.writeUInt32LE(offset, 42);
+
+    locals.push(lfh, nameBuf, comp);
+    cds.push(cdh, nameBuf);
+    offset += 30 + nameBuf.length + comp.length;
+  }
+  const cdBuf = Buffer.concat(cds);
+  const eocd = Buffer.alloc(22);
+  eocd.writeUInt32LE(0x06054b50, 0);
+  eocd.writeUInt16LE(entries.length, 8);
+  eocd.writeUInt16LE(entries.length, 10);
+  eocd.writeUInt32LE(cdBuf.length, 12);
+  eocd.writeUInt32LE(offset, 16);
+  return Buffer.concat([...locals, cdBuf, eocd]);
+}
 
 function makeEucKrRoadSample() {
   // Valid ASCII + Korean station row? Test pure ASCII + Hangul UTF/EUC-KR roundtrip check separately
@@ -98,10 +141,42 @@ test('Cloudflare Worker는 CORS·OPTIONS·health·도로관측(중복 Ncst 생�
     if (u.includes('ensemble-api.open-meteo.com')) {
       return { ok: false, status: 429, json: async () => ({ error: true }) };
     }
+    if (u.includes('road_file_down.php')) {
+      assert.ok(u.includes('roadNum=012'));
+      const frgCsv = [
+        'LINK_ID,S_NUM,F_LON,F_LAT,T_LON,T_LAT,B_ICE,FLAG,X_GRID,Y_GRID',
+        '1570030500,1,127.7490,35.5325,127.7500,35.5330,2,1,350,300',
+        '1570030600,1,128.4010,35.7650,128.4020,35.7656,3,0,390,305'
+      ].join('\n');
+      const fogCsv = [
+        'LINK_ID,S_NUM,F_LON,F_LAT,T_LON,T_LAT,FOG,FLAG,X_GRID,Y_GRID',
+        '1570030500,1,127.7490,35.5325,127.7500,35.5330,1,0,350,300',
+        '1570030600,1,128.4010,35.7650,128.4020,35.7656,0,0,390,305'
+      ].join('\n');
+      const zipBuf = makeTestZip([
+        { name: 'RWS/PRODUCT/FRG/202611/18/R012_1KM_FRG_202611181425.csv', content: frgCsv, deflate: false },
+        { name: 'RWS/PRODUCT/FOG/202611/18/R012_1KM_FOG_202611181425.csv', content: fogCsv, deflate: true }
+      ]);
+      return { ok: true, status: 200, arrayBuffer: async () => zipBuf };
+    }
     return { ok: false, status: 404, text: async () => 'not found' };
   };
 
   try {
+    // Road Risk 012 ZIP parsing (STORED + DEFLATE + station/place coordinate matching)
+    const rrRes = await worker.fetch(new Request('https://bionda-api.workers.dev/api/road-risk?roadNum=012'), env);
+    assert.equal(rrRes.status, 200);
+    const rr = await rrRes.json();
+    assert.equal(rr.roadNum, '012');
+    assert.equal(rr.corridorSummary.maxIce, 3);
+    assert.equal(rr.corridorSummary.iceLabel, '위험');
+    assert.equal(rr.corridorSummary.maxFog, 1);
+    assert.equal(rr.placeRisks['35.520,127.725'].stationName, '함양(도)');
+    assert.equal(rr.placeRisks['35.520,127.725'].iceLevel, 2);
+    assert.equal(rr.placeRisks['35.520,127.725'].iceLabel, '주의');
+    assert.equal(rr.placeRisks['35.520,127.725'].fogLevel, 1);
+    assert.equal(rr.placeRisks['35.697,128.447'].iceLevel, 3);
+    assert.equal(rr.placeRisks['35.697,128.447'].iceLabel, '위험');
     // Observation (roadMatch succeeds -> zero getUltraSrtNcst outbound call!)
     const obsRes = await worker.fetch(new Request('https://bionda-api.workers.dev/api/observation?lat=35.644&lon=127.910'), env);
     assert.equal(obsRes.status, 200);

@@ -31,7 +31,12 @@ import {
   extractCapLinksFromRss,
   populateCapPolygons,
   warningMatchesPlace,
-  detectRadarImageType
+  detectRadarImageType,
+  utcFiveMinSlot,
+  extractZipTextEntries,
+  parseRoadRiskCsv,
+  buildRoadRiskPayload,
+  matchStationRiskForCoord
 } from '../lib/bionda-core.js';
 
 const SHARED_CACHE = new Map();
@@ -259,6 +264,42 @@ async function fetchRoadStations(env, line = getRoadLineCode(env)) {
   });
 }
 
+async function fetchRoadRisk(env, roadNum = '012') {
+  const key = getRoadKey(env);
+  if (!key) throw new Error('KMA_ROAD_KEY 또는 KMA_SERVICE_KEY 미설정');
+  const cleanNum = String(roadNum || '012').replace(/\D/g, '').padStart(3, '0').slice(-3);
+  const cacheKey = `road-risk|${cleanNum}`;
+  const hit = getCached(cacheKey);
+  if (hit) return hit;
+
+  return withInFlight(cacheKey, async () => {
+    const now = Date.now();
+    const offsetsMinutes = [5, 10, 15, 20];
+    for (const off of offsetsMinutes) {
+      const { tmUtc, tmKst } = utcFiveMinSlot(now - off * 60000);
+      const u = new URL('https://apihub.kma.go.kr/api/typ04/url/road_file_down.php');
+      u.searchParams.set('tm', tmUtc);
+      u.searchParams.set('roadNum', cleanNum);
+      u.searchParams.set('authKey', deEncodedKey(key));
+      const r = await fetchWithTimeout(u.toString(), {}, 12000);
+      if (!r.ok) continue;
+      const bytes = new Uint8Array(await r.arrayBuffer());
+      if (bytes.length < 22 || bytes[0] !== 0x50 || bytes[1] !== 0x4b) continue;
+      const files = await extractZipTextEntries(bytes, fn => /_(1KM)_(FRG|FOG)_/i.test(fn));
+      const frgEntry = Object.entries(files).find(([k]) => /_FRG_/i.test(k));
+      const fogEntry = Object.entries(files).find(([k]) => /_FOG_/i.test(k));
+      if (!frgEntry && !fogEntry) continue;
+      const frgRows = frgEntry ? parseRoadRiskCsv(frgEntry[1]) : [];
+      const fogRows = fogEntry ? parseRoadRiskCsv(fogEntry[1]) : [];
+      if (!frgRows.length && !fogRows.length) continue;
+      const payload = buildRoadRiskPayload({ roadNum: cleanNum, tmUtc, tmKst, frgRows, fogRows });
+      setCached(cacheKey, payload, 9 * 60000);
+      return payload;
+    }
+    throw new Error('도로 위험기상정보(FRG/FOG) ZIP 자료를 가져오지 못했습니다.');
+  });
+}
+
 async function getObservationForPlace(env, lat, lon) {
   const cacheKey = `obs|${lat.toFixed(3)}|${lon.toFixed(3)}`;
   const hit = getCached(cacheKey);
@@ -450,6 +491,30 @@ export default {
       try {
         const value = await fetchRoadStations(env, line);
         const res = jsonResponse(request, env, 200, value, { 'Cache-Control': 'public, max-age=60, s-maxage=90' });
+        putEdgeCache(ctx, cacheKeyReq, res);
+        return res;
+      } catch (e) {
+        return jsonResponse(request, env, 502, { error: errMessage(e) });
+      }
+    }
+
+    if (pathname === '/api/road-risk') {
+      if (!getRoadKey(env)) {
+        return jsonResponse(request, env, 503, { code: 'ROAD_KEY_MISSING', error: '도로 위험기상정보 API 키가 설정되지 않았습니다.' });
+      }
+      const roadNum = requestUrl.searchParams.get('roadNum') || '012';
+      try {
+        const value = await fetchRoadRisk(env, roadNum);
+        const latRaw = requestUrl.searchParams.get('lat');
+        const lonRaw = requestUrl.searchParams.get('lon');
+        let out = value;
+        if (latRaw !== null && lonRaw !== null) {
+          const lat = Number(latRaw), lon = Number(lonRaw);
+          if (Number.isFinite(lat) && Number.isFinite(lon)) {
+            out = { ...value, customPlaceRisk: matchStationRiskForCoord(lat, lon, value.stationRisks, null, null, 6) };
+          }
+        }
+        const res = jsonResponse(request, env, 200, out, { 'Cache-Control': 'public, max-age=480, s-maxage=540' });
         putEdgeCache(ctx, cacheKeyReq, res);
         return res;
       } catch (e) {
