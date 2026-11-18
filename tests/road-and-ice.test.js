@@ -36,6 +36,23 @@ test('광주대구선(14번) 도로기상관측 매분자료 파싱 및 8개 관
   assert.equal(matched.bridgeStationName, '죽산천교(도)');
   assert.equal(matched.bridgeMilepostKm, 102.9);
   assert.equal(matched.bridgeRoadTemp, 11.6);
+
+  // 야로면(35.706, 128.168)은 24km 떨어진 논공교를 결빙취약교량으로 오매칭하지 않아야 함
+  const yaroWithDistantBridge = parseRoadStations([
+    '#START7777',
+    ' 202611181540, 14208, 거창휴(도), 무안광주대구선, 기본, 35.7074, 128.0541, 393, 1, 9.1, 30000, 74, 0, 0, 6.9, 270, 1.0, 270, 1.5, 1014, -999, -999, -999, -999',
+    ' 202611181540, 14410, 논공교(도), 무안광주대구선, 목표(결빙), 35.7681, 128.4230, 30, 1, 11.8, -999, -999, -999, -999, -999, -999, -999, -999, -999, -999, -999, -999, -999, -999',
+    '#7777END'
+  ].join('\n'));
+  const yaroMatched = matchRoadStation(35.706, 128.168, yaroWithDistantBridge);
+  assert.equal(yaroMatched.roadStationName, '거창휴(도)');
+  assert.equal(yaroMatched.bridgeStationName, null);
+
+  // 현풍읍(35.697, 128.447)은 최근접 노면관측소 자체가 논공교(도)[목표(결빙)]이므로 bridgeStationName 중복 제거
+  const hyunpungMatched = matchRoadStation(35.697, 128.447, yaroWithDistantBridge);
+  assert.equal(hyunpungMatched.roadStationName, '논공교(도)');
+  assert.equal(hyunpungMatched.roadStationType, '목표(결빙)');
+  assert.equal(hyunpungMatched.bridgeStationName, null);
 });
 
 test('기상특보 전종 파싱 및 도로관리 위험도 우선순위 정렬 (경보 > 주의보 > 예비특보, 대설/호우 > 한파/강풍)', () => {

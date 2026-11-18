@@ -75,9 +75,30 @@ test('주야간 시각 추론 및 KMA 수치 코드 → 히어로 장면 자동 
   assert.equal(inferWeatherFromKma({ sky: '3', pty: '0' }), 'partly_cloudy');
   assert.equal(inferWeatherFromKma({ sky: '1', pty: '0' }), 'clear');
 
-  // 다중 렌더링 시 SVG <defs> ID 충돌이 발생하지 않는지 확인
+  // 다중 렌더링 시 SVG <defs> ID 충돌이 발생하지 않는지 확인 및 0~3단계 도로 살얼음 색상/태풍 기호 검증
   const first = renderHeroSceneMarkup({ dayPhase: 'night', weather: 'partly_cloudy', moonAgeDays: 14.8, blackIce: true, coldWave: true });
-  const second = renderHeroSceneMarkup({ dayPhase: 'night', weather: 'partly_cloudy', moonAgeDays: 14.8, blackIce: true, coldWave: true });
+  const second = renderHeroSceneMarkup({ dayPhase: 'night', weather: 'partly_cloudy', moonAgeDays: 14.8, iceRank: 3, coldWave: true });
+  assert.equal(first.scene.iceRank, 2);
+  assert.equal(first.scene.iceMeta.accent, '#f97316');
+  assert.equal(second.scene.iceRank, 3);
+  assert.equal(second.scene.iceMeta.accent, '#ef4444');
+  assert.ok(second.html.includes('3단계 위험'));
+  const rank1 = renderHeroSceneMarkup({ dayPhase: 'day', weather: 'clear', iceRank: 1 });
+  assert.equal(rank1.scene.iceMeta.accent, '#eab308');
+  assert.ok(rank1.html.includes('1단계 관심'));
+  const rank0 = renderHeroSceneMarkup({ dayPhase: 'day', weather: 'clear', iceRank: 0 });
+  assert.equal(rank0.scene.iceMeta.accent, '#10b981');
+  assert.ok(!rank0.html.includes('hs-road-stage-pill'));
+
+  const ty = renderHeroSceneMarkup({
+    dayPhase: 'day',
+    weather: 'typhoon',
+    typhoonInfo: { no: '제14호', name: '난마돌', pressureHpa: 940, maxWindMs: 47 }
+  });
+  assert.ok(ty.html.includes('제14호 태풍 난마돌'));
+  assert.ok(ty.html.includes('940 hPa'));
+  assert.ok(ty.html.includes('hs-typhoon-svg'));
+
   const idsA = [...first.html.matchAll(/\bid="([^"]+)"/g)].map(m => m[1]);
   const idsB = [...second.html.matchAll(/\bid="([^"]+)"/g)].map(m => m[1]);
   assert.ok(idsA.length > 0 && idsB.length > 0);
