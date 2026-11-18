@@ -54,18 +54,22 @@
 ## 3. 프론트엔드 자동 갱신 및 `[↻ 새로고침]` 강제 재조회 로직
 
 ### 3.1 도로기상 상황판 (`public/app.js`)
-- **매 5분(`300,000ms`)**: `!document.hidden`일 때 `refresh()` 실행 → `bundle`(90초 TTL) 및 `road-obs`(2분 TTL)가 이미 만료되어 매 5분마다 **항상 최신 1분 도로관측 및 5분 도로위험**을 수신합니다.
+- **페이지 전환 0ms 로컬 캐시 · 3분 머무름 SWR (`public/page-cache.js`)**:
+  - 최근 응답을 `localStorage`(`weather-watch:cache:overview:v1`) 및 백엔드 상태 캐시(`weather-watch:cache:health:v1`)에 보관합니다.
+  - 단기예보 등 다른 페이지를 오갔을 때 **5분 이내·동일 KST 정시**라면 `0ms` 즉시 복원하고 불필요한 API 재호출을 생략하며, 해당 화면에 **3분 이상 머무르면** 백그라운드에서 조용히 최신화(SWR)합니다. (5분~20분 경과 또는 정시 변경 시에도 직전 값을 먼저 표출한 채 즉시 백그라운드 갱신)
+- **매 5분(`300,000ms`)**: `!document.hidden`일 때 백그라운드 `refresh({ silent: true })` 실행 → `bundle`(90초 TTL) 및 `road-obs`(2분 TTL)가 만료되어 매 5분마다 **항상 최신 1분 도로관측 및 5분 도로위험**을 수신합니다.
 - **매 1분(`60,000ms`)**: `pollWarnings()` 특보 변동 감시 및 등급 상승 시 상단 토스트 + Web Audio 경보음/기기 알림.
-- **탭 복귀(`visibilitychange`)**: 화면 WakeLock 재획득 + `refresh()` 즉시 수행.
+- **탭 복귀(`visibilitychange`)**: 화면 WakeLock 재획득 + 마지막 라이브 동기화 기준 **5분 경과 또는 정시 변경 시**에만 `refresh()` 수행(짧은 탭 전환 시 중복 호출 방지).
 - **상단/상세 `[↻ 새로고침]` (`refresh(true)`)**: `force=1`로 Edge·Worker 메모리 캐시(`bundle`, `road-obs`) 및 Open-Meteo `forecast` 캐시를 즉시 우회하여 재조회합니다.
 
 ### 3.2 1시간 단기예보 (`public/hourly.js`)
-KMA 초단기예보는 매시 정각이 아닌 **`HH:30` 발표분(`HH:35~:45` API 공개)**으로 갱신되므로, 3중 자동 갱신 + 선택적 수동 강제 재조회를 조합합니다.
+KMA 초단기예보는 매시 정각이 아닌 **`HH:30` 발표분(`HH:35~:45` API 공개)**으로 갱신되고 단기예보는 1시간 단위이므로, **즉시 전환 캐싱 + 3중 자동 갱신(정시 · 36분 · 10분)** 을 조합합니다.
 
-1. **정시 롤오버 (`scheduleTopOfHourRefresh`)**: 매시 `HH:00:01.5 KST`에 `?force=1&refreshShort=1&refreshUltra=1`로 호출해 표의 시간축(`06시~` → `07시~`)을 정각에 즉시 전환(백그라운드 절전 시 `visibilitychange` + 1분 체크로 즉시 보정).
-2. **초단기 신규 발표 픽업 (`scheduleUltraPickupRefresh`)**: 매시 **`HH:36:15 KST`**에 `refreshUltra=1`로 자동 호출하여 방금 공개된 `HH:30` 초단기예보를 즉시 반영.
-3. **5분 주기 갱신**: `isUltraUpdateDue()`(`ultraBase + 66분` 경과 여부, 예: `05:30` 자료 유지 상태에서 `06:36` 도달)를 검사해 신규 발표 시각이 지났으면 자동으로 `force=1&refreshUltra=1` 우회 조회.
-4. **상단 `[↻ 새로고침]` 수동 클릭 규칙 (`computeManualRefreshFlags`)**:
+1. **페이지 전환 0ms 로컬 캐시 · 3분 머무름 SWR**: `localStorage`(`weather-watch:cache:hourly:v1`)가 **5분 이내 · 동일 KST 정시 · 초단기 신규 발표 전**이면 즉시 렌더링해 전환 지연을 없애고, **3분 이상 머무르면** 백그라운드에서 조용히 최신화합니다.
+2. **정시 롤오버 (`scheduleTopOfHourRefresh`)**: 매시 `HH:00:01.5 KST`에 `?force=1&refreshShort=1&refreshUltra=1`로 호출해 표의 시간축(`06시~` → `07시~`)을 정각에 즉시 전환(백그라운드 절전 시 `visibilitychange` + 1분 체크로 즉시 보정).
+3. **초단기 신규 발표 픽업 (`scheduleUltraPickupRefresh`)**: 매시 **`HH:36:15 KST`**에 `refreshUltra=1`로 자동 호출하여 방금 공개된 `HH:30` 초단기예보를 즉시 반영.
+4. **10분 주기 갱신 (`600,000ms`)**: `isUltraUpdateDue()`(`ultraBase + 66분` 경과 여부, 예: `05:30` 자료 유지 상태에서 `06:36` 도달)를 검사해 신규 발표 시각이 지났으면 자동으로 `force=1&refreshUltra=1` 우회 조회합니다.
+5. **상단 `[↻ 새로고침]` 수동 클릭 규칙 (`computeManualRefreshFlags`)**:
    - **단기예보 (`refreshShort`)**: 현재 표시된 `shortBase`로부터 **3시간(180분) 이상** 경과 시 Worker `getVilageFcst` 11격자 캐시까지 완전히 우회해 강제 재조회 (`3시간 미만`이면 Worker 격자 캐시 활용).
    - **초단기예보 (`refreshUltra`)**: 현재 표시된 `ultraBase`로부터 **10분 초과** 경과 시 Worker `getUltraSrtFcst` 11격자 캐시까지 완전히 우회해 기상청 직접 재조회 (`force=1`로 Cloudflare Edge Cache는 항상 우회).
 
