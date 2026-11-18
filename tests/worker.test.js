@@ -104,10 +104,13 @@ test('Cloudflare Worker는 CORS·OPTIONS·health·도로관측(중복 Ncst 생�
     return items;
   };
 
+  let roadObsAttempt = 0;
   global.fetch = async (input) => {
     const u = String(input);
     hitUrls.push(u);
     if (u.includes('road_stn_obs.php')) {
+      roadObsAttempt++;
+      if (roadObsAttempt === 1) throw new Error('Simulated KMA minute timeout');
       return { ok: true, status: 200, arrayBuffer: async () => Buffer.from(makeEucKrRoadSample(), 'utf8') };
     }
     if (u.includes('wrn_now_data.php')) {
@@ -186,12 +189,13 @@ test('Cloudflare Worker는 CORS·OPTIONS·health·도로관측(중복 Ncst 생�
     assert.equal(rr.placeRisks['35.520,127.725'].fogLevel, 1);
     assert.equal(rr.placeRisks['35.697,128.447'].iceLevel, 3);
     assert.equal(rr.placeRisks['35.697,128.447'].iceLabel, '위험');
-    // Observation (roadMatch succeeds -> zero getUltraSrtNcst outbound call!)
+    // Observation (first road_stn_obs attempt times out -> second succeeds -> zero getUltraSrtNcst outbound call!)
     const obsRes = await worker.fetch(new Request('https://bionda-api.workers.dev/api/observation?lat=35.644&lon=127.910'), env);
     assert.equal(obsRes.status, 200);
     const obs = await obsRes.json();
     assert.equal(obs.name, 'Namsang(Road)');
     assert.equal(obs.roadTemp, 7.4);
+    assert.equal(roadObsAttempt, 2);
     assert.equal(hitUrls.filter(u => u.includes('getUltraSrtNcst')).length, 0);
 
     // Forecast

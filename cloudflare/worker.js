@@ -163,7 +163,7 @@ async function fetchKmaFromBase(baseUrl, resource, grid, base, rawKey, timeout =
   return parseKmaForecastJson(await r.text());
 }
 
-async function fetchKma(env, resource, grid, base, timeout = 7500) {
+async function fetchKma(env, resource, grid, base, timeout = 5000) {
   const apiKey = getServiceKey(env);
   if (!apiKey) throw new Error('KMA_SERVICE_KEY 미설정');
   const cacheKey = `kma|${resource}|${grid.nx}|${grid.ny}|${datePart(base)}|${timePart(base)}`;
@@ -184,6 +184,7 @@ async function fetchKma(env, resource, grid, base, timeout = 7500) {
         return items;
       } catch (e) {
         lastErr = e;
+        console.warn('[fetchKma]', resource, baseUrl.includes('apihub') ? 'apihub' : 'data.go.kr', grid.nx, grid.ny, errMessage(e));
       }
     }
     throw lastErr;
@@ -246,35 +247,44 @@ async function fetchRoadStations(env, line = getRoadLineCode(env)) {
   const key = getRoadKey(env);
   if (!key) throw new Error('KMA_ROAD_KEY 또는 KMA_SERVICE_KEY 미설정');
   const cacheKey = `road-obs|${line}`;
+  const staleKey = `road-obs-last-good|${line}`;
   const hit = getCached(cacheKey);
   if (hit) return hit;
 
   return withInFlight(cacheKey, async () => {
     const now = Date.now();
-    const offsetsMinutes = [2, 4, 8];
+    const offsetsMinutes = [2, 5, 9];
     let lastStations = [];
     for (const off of offsetsMinutes) {
-      const d = kst(now - off * 60000);
-      const tm1 = datePart(d) + timePart(d);
-      const u = new URL('https://apihub.kma.go.kr/api/typ01/url/road_stn_obs.php');
-      u.searchParams.set('mode', '2');
-      u.searchParams.set('tm1', tm1);
-      u.searchParams.set('var', String(line));
-      u.searchParams.set('disp', '1');
-      u.searchParams.set('help', '2');
-      u.searchParams.set('authKey', deEncodedKey(key));
-      const r = await fetchWithTimeout(u.toString(), {}, 10000);
-      if (!r.ok) continue;
-      const bytes = new Uint8Array(await r.arrayBuffer());
-      const text = new TextDecoder('euc-kr').decode(bytes);
-      const parsed = parseRoadStations(text);
-      if (parsed.length) {
-        lastStations = parsed;
-        if (parsed.some(s => s.temp !== null || s.roadTemp !== null)) {
-          const result = { ok: true, line: String(line), tm1, updatedAt: new Date().toISOString(), stations: parsed };
-          setCached(cacheKey, result, 2 * 60000);
-          return result;
+      try {
+        const d = kst(now - off * 60000);
+        const tm1 = datePart(d) + timePart(d);
+        const u = new URL('https://apihub.kma.go.kr/api/typ01/url/road_stn_obs.php');
+        u.searchParams.set('mode', '2');
+        u.searchParams.set('tm1', tm1);
+        u.searchParams.set('var', String(line));
+        u.searchParams.set('disp', '1');
+        u.searchParams.set('help', '2');
+        u.searchParams.set('authKey', deEncodedKey(key));
+        const r = await fetchWithTimeout(u.toString(), {}, 5000);
+        if (!r.ok) {
+          console.warn('[fetchRoadStations] HTTP', r.status, tm1);
+          continue;
         }
+        const bytes = new Uint8Array(await r.arrayBuffer());
+        const text = new TextDecoder('euc-kr').decode(bytes);
+        const parsed = parseRoadStations(text);
+        if (parsed.length) {
+          lastStations = parsed;
+          if (parsed.some(s => s.temp !== null || s.roadTemp !== null)) {
+            const result = { ok: true, line: String(line), tm1, updatedAt: new Date().toISOString(), stations: parsed };
+            setCached(cacheKey, result, 2 * 60000);
+            setCached(staleKey, result, 20 * 60000);
+            return result;
+          }
+        }
+      } catch (e) {
+        console.warn('[fetchRoadStations] err off=' + off, errMessage(e));
       }
     }
     if (lastStations.length) {
@@ -282,6 +292,8 @@ async function fetchRoadStations(env, line = getRoadLineCode(env)) {
       setCached(cacheKey, result, 60000);
       return result;
     }
+    const stale = getCached(staleKey);
+    if (stale) return stale;
     throw new Error('도로기상관측 자료를 가져오지 못했습니다.');
   });
 }
@@ -291,6 +303,7 @@ async function fetchRoadRisk(env, roadNum = '012') {
   if (!key) throw new Error('KMA_ROAD_KEY 또는 KMA_SERVICE_KEY 미설정');
   const cleanNum = String(roadNum || '012').replace(/\D/g, '').padStart(3, '0').slice(-3);
   const cacheKey = `road-risk|${cleanNum}`;
+  const staleKey = `road-risk-last-good|${cleanNum}`;
   const hit = getCached(cacheKey);
   if (hit) return hit;
 
@@ -298,26 +311,33 @@ async function fetchRoadRisk(env, roadNum = '012') {
     const now = Date.now();
     const offsetsMinutes = [5, 10, 15, 20];
     for (const off of offsetsMinutes) {
-      const { tmUtc, tmKst } = utcFiveMinSlot(now - off * 60000);
-      const u = new URL('https://apihub.kma.go.kr/api/typ04/url/road_file_down.php');
-      u.searchParams.set('tm', tmUtc);
-      u.searchParams.set('roadNum', cleanNum);
-      u.searchParams.set('authKey', deEncodedKey(key));
-      const r = await fetchWithTimeout(u.toString(), {}, 12000);
-      if (!r.ok) continue;
-      const bytes = new Uint8Array(await r.arrayBuffer());
-      if (bytes.length < 22 || bytes[0] !== 0x50 || bytes[1] !== 0x4b) continue;
-      const files = await extractZipTextEntries(bytes, fn => /_(1KM)_(FRG|FOG)_/i.test(fn));
-      const frgEntry = Object.entries(files).find(([k]) => /_FRG_/i.test(k));
-      const fogEntry = Object.entries(files).find(([k]) => /_FOG_/i.test(k));
-      if (!frgEntry && !fogEntry) continue;
-      const frgRows = frgEntry ? parseRoadRiskCsv(frgEntry[1]) : [];
-      const fogRows = fogEntry ? parseRoadRiskCsv(fogEntry[1]) : [];
-      if (!frgRows.length && !fogRows.length) continue;
-      const payload = buildRoadRiskPayload({ roadNum: cleanNum, tmUtc, tmKst, frgRows, fogRows });
-      setCached(cacheKey, payload, 9 * 60000);
-      return payload;
+      try {
+        const { tmUtc, tmKst } = utcFiveMinSlot(now - off * 60000);
+        const u = new URL('https://apihub.kma.go.kr/api/typ04/url/road_file_down.php');
+        u.searchParams.set('tm', tmUtc);
+        u.searchParams.set('roadNum', cleanNum);
+        u.searchParams.set('authKey', deEncodedKey(key));
+        const r = await fetchWithTimeout(u.toString(), {}, 6500);
+        if (!r.ok) continue;
+        const bytes = new Uint8Array(await r.arrayBuffer());
+        if (bytes.length < 22 || bytes[0] !== 0x50 || bytes[1] !== 0x4b) continue;
+        const files = await extractZipTextEntries(bytes, fn => /_(1KM)_(FRG|FOG)_/i.test(fn));
+        const frgEntry = Object.entries(files).find(([k]) => /_FRG_/i.test(k));
+        const fogEntry = Object.entries(files).find(([k]) => /_FOG_/i.test(k));
+        if (!frgEntry && !fogEntry) continue;
+        const frgRows = frgEntry ? parseRoadRiskCsv(frgEntry[1]) : [];
+        const fogRows = fogEntry ? parseRoadRiskCsv(fogEntry[1]) : [];
+        if (!frgRows.length && !fogRows.length) continue;
+        const payload = buildRoadRiskPayload({ roadNum: cleanNum, tmUtc, tmKst, frgRows, fogRows });
+        setCached(cacheKey, payload, 9 * 60000);
+        setCached(staleKey, payload, 25 * 60000);
+        return payload;
+      } catch (e) {
+        console.warn('[fetchRoadRisk] err off=' + off, errMessage(e));
+      }
     }
+    const stale = getCached(staleKey);
+    if (stale) return stale;
     throw new Error('도로 위험기상정보(FRG/FOG) ZIP 자료를 가져오지 못했습니다.');
   });
 }
