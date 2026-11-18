@@ -69,7 +69,15 @@
 2. 서비스 클릭 후 **Variables** 탭에서 **+ New Variable**을 눌러 `KMA_SERVICE_KEY` 값을 입력합니다.
 3. **Settings > Networking > Generate Domain**을 눌러 공개 HTTPS 주소를 발급받습니다.
 
-### C. GitHub Pages + GitHub Actions Secrets 연동 방법
+### C. GitHub Pages + Cloudflare Workers 무료 24시간 실시간 연동 (권장, \$0/년)
+1. [Cloudflare Dashboard](https://dash.cloudflare.com/) → **Workers & Pages > Create** → **Import a repository (GitHub)**로 `PoeticEcho/bionda`를 연결합니다 (`wrangler.toml`이 자동 인식됩니다).
+   *(GitHub 연결 대신 직접 붙여넣기를 원하시면 `npm run build:worker` 실행 후 생성되는 `dist/bionda-worker.standalone.js` 내용을 복사해 Workers 에디터에 붙여넣으셔도 됩니다.)*
+2. Worker의 **Settings > Variables and Secrets**에서 `+ Add` → **`Secret`** 타입으로 아래 값을 등록합니다:
+   - `KMA_SERVICE_KEY`: 발급받은 기상청 인증키
+   - *(선택)* `KMA_RADAR_KEY`, `KMA_ROAD_KEY` (미등록 시 `KMA_SERVICE_KEY` 공용 사용)
+3. 발급된 `https://bionda-api.<사용자계정>.workers.dev` 주소를 사이트 상단 **`[⚙ 설정] → 🔌 실시간 기상청 백엔드 연동`**에 입력하거나 `public/config.js`의 `DEFAULT_API_BASE`에 넣으면 GitHub Pages에서도 24시간 슬립 없이 5분마다 실시간 기상청 관측이 동작합니다.
+
+### D. GitHub Pages + GitHub Actions Secrets 연동 (정기 스냅샷 방식)
 1. GitHub 저장소의 **Settings > Secrets and variables > Actions**로 이동합니다.
 2. **New repository secret** 버튼을 눌러 `Name`에 `KMA_SERVICE_KEY`, `Secret`에 기상청 API 키를 입력하고 저장합니다.
 3. GitHub Actions 워크플로(`.github/workflows/pages.yml`)가 서버 측에서 안전하게 기상청 데이터를 검증·스냅샷 생성(키 노출 0건)하여 공개 HTTPS 페이지로 배포합니다.

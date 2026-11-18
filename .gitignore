@@ -8,3 +8,5 @@ node_modules/
 *.apk
 *.zip
 _github_upload_bundle*
+.wrangler/
+dist/

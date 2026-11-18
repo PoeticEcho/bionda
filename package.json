@@ -11,6 +11,7 @@
     "dev": "node --use-system-ca --env-file-if-exists=.env server.js",
     "snapshot": "node --use-system-ca --env-file-if-exists=.env scripts/build-static-snapshot.js",
     "briefing": "node --use-system-ca --env-file-if-exists=.env scripts/build-agent-briefing.js",
+    "build:worker": "node scripts/build-worker-bundle.js",
     "test": "node --use-system-ca --test tests/*.test.js"
   }
 }
