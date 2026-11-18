@@ -406,12 +406,15 @@ test('무안광주대구선(012) 위험수준 격상 판정(0→2, 0→3, 1→2,
   assert.equal(classifySeverityTier({ roadRisk: { iceLevel: 0, fogLevel: 3 } }).tier, 3);
 
   const { DEFAULT_API_BASE, getApiBase } = await import('../public/config.js');
-  assert.equal(DEFAULT_API_BASE, 'https://bionda-api.herego.workers.dev');
+  assert.equal(DEFAULT_API_BASE, 'https://bionda.herego.workers.dev');
   const prevWin = global.window;
+  const prevStorage = global.localStorage;
   global.window = { location: { hostname: 'poeticecho.github.io', protocol: 'https:' } };
+  global.localStorage = { getItem: (k) => (k === 'weather-watch:api-base' ? 'https://bionda-api.herego.workers.dev' : null) };
   try {
-    assert.equal(getApiBase(), 'https://bionda-api.herego.workers.dev');
+    assert.equal(getApiBase(), 'https://bionda.herego.workers.dev');
   } finally {
     global.window = prevWin;
+    global.localStorage = prevStorage;
   }
 });
