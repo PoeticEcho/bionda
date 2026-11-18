@@ -97,7 +97,11 @@ test('주야간 시각 추론 및 KMA 수치 코드 → 히어로 장면 자동 
   });
   assert.ok(ty.html.includes('제14호 태풍 난마돌'));
   assert.ok(ty.html.includes('940 hPa'));
-  assert.ok(ty.html.includes('hs-typhoon-svg'));
+  assert.ok(ty.html.includes('hs-typhoon-tag'));
+  assert.ok(!ty.html.includes('hs-typhoon-svg'));
+  // 화면 전체 끝까지 끊김 없이 이어지는 풀블리드 도로(-20..) + 좌측 그라데이션 페이드 마스크 확인
+  assert.ok(ty.html.includes('roadMask'));
+  assert.ok(ty.html.includes('M-20,'));
 
   const idsA = [...first.html.matchAll(/\bid="([^"]+)"/g)].map(m => m[1]);
   const idsB = [...second.html.matchAll(/\bid="([^"]+)"/g)].map(m => m[1]);
