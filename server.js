@@ -275,6 +275,20 @@ function analyze(hourly, observed) {
       maxChance: block.some(h => h.chance != null) ? Math.max(...block.map(h => h.chance ?? 0)) : null
     };
   };
+  const makeRange = (minOffset, maxOffset, label) => {
+    const block = hourly.filter(h => h.offset >= minOffset && h.offset <= maxOffset);
+    const possibilities = block.filter(h => h.wet || h.risk);
+    const precip = block.filter(h => h.wet);
+    return {
+      label,
+      minOffset,
+      maxOffset,
+      hasPrecipitation: precip.length > 0,
+      hasRisk: possibilities.length > 0,
+      kinds: [...new Set(precip.map(h => h.type))],
+      maxChance: block.some(h => h.chance != null) ? Math.max(...block.map(h => h.chance ?? 0)) : null
+    };
+  };
   return {
     now: observed,
     windowHours: hourly.length,
@@ -287,7 +301,12 @@ function analyze(hourly, observed) {
     end: endIndex != null ? { time: hourly[endIndex].time, rule: '연속 2시간 무강수 예보' } : null,
     extendsBeyondWindow: startIndex >= 0 && endIndex == null,
     noRainSignal: startIndex === -1,
-    horizons: [makeHorizon(3), makeHorizon(6), makeHorizon(12)]
+    horizons: [makeHorizon(3), makeHorizon(6), makeHorizon(12)],
+    horizonRanges: [
+      makeRange(1, 3, '향후 3시간'),
+      makeRange(4, 6, '3~6시간'),
+      makeRange(7, 12, '향후 6~12시간')
+    ]
   };
 }
 
@@ -336,8 +355,32 @@ async function forecast(lat, lon) {
 }
 
 /**
- * 3.1.2 고속도로 노선으로 조회API (road_stn_obs.php?mode=2&var=14 무안광주대구선)
+ * 3.1.2 고속도로 노선으로 조회API (road_stn_obs.php?mode=2&var=14 무안광주대구선 → 실제 고속국도 제12호선)
+ * 이정(km)은 한국도로공사 고령지사 MMF 도로DB(roads-db-v3.json) 기준 실측 정합
  */
+const ROUTE12_MILEPOST_BY_STN = {
+  '14402': { routeNo: '12', section: '무안광주선', km: 8.9 },
+  '14202': { routeNo: '12', section: '무안광주선', km: 12.4 },
+  '14403': { routeNo: '12', section: '무안광주선', km: 29.6 },
+  '14203': { routeNo: '12', section: '무안광주선', km: 38.8 },
+  '14404': { routeNo: '12', section: '무안광주선', km: 41.1 },
+  '14405': { routeNo: '12', section: '광주대구선', km: 19.2 },
+  '14204': { routeNo: '12', section: '광주대구선', km: 27.0 },
+  '14406': { routeNo: '12', section: '광주대구선', km: 30.6 },
+  '14302': { routeNo: '12', section: '광주대구선', km: 36.5 },
+  '14205': { routeNo: '12', section: '광주대구선', km: 50.8 },
+  '14407': { routeNo: '12', section: '광주대구선', km: 72.9 },
+  '14102': { routeNo: '12', section: '광주대구선', km: 75.4 },
+  '14408': { routeNo: '12', section: '광주대구선', km: 86.2 },
+  '14206': { routeNo: '12', section: '광주대구선', km: 95.0 },
+  '14409': { routeNo: '12', section: '광주대구선', km: 102.9 },
+  '14207': { routeNo: '12', section: '광주대구선', km: 115.3 },
+  '14208': { routeNo: '12', section: '광주대구선', km: 134.1 },
+  '14209': { routeNo: '12', section: '광주대구선', km: 158.2 },
+  '14103': { routeNo: '12', section: '광주대구선', km: 169.2 },
+  '14410': { routeNo: '12', section: '광주대구선', km: 171.3 }
+};
+
 const SURFACE_STATES = {
   1: '건조',
   2: '습윤',
@@ -384,12 +427,16 @@ function parseRoadStations(rawText) {
     if (/^\d{12}$/.test(tmRaw)) {
       isoTime = `${tmRaw.slice(0, 4)}-${tmRaw.slice(4, 6)}-${tmRaw.slice(6, 8)}T${tmRaw.slice(8, 10)}:${tmRaw.slice(10, 12)}:00+09:00`;
     }
+    const mp = ROUTE12_MILEPOST_BY_STN[stnId] || null;
     stations.push({
       tm: tmRaw,
       time: isoTime,
       stnId,
       name,
       roadName,
+      routeNo: mp?.routeNo || '12',
+      roadSection: mp?.section || roadName,
+      milepostKm: mp?.km ?? null,
       stationType,
       lat,
       lon,
@@ -435,6 +482,8 @@ function matchRoadStation(lat, lon, stations) {
   return {
     name: primary.name,
     stnId: primary.stnId,
+    routeNo: primary.routeNo || '12',
+    milepostKm: primary.milepostKm ?? null,
     roadName: primary.roadName || '무안광주대구선',
     stationType: primary.stationType,
     elevation: primary.elevation,
@@ -448,15 +497,17 @@ function matchRoadStation(lat, lon, stations) {
     gustSpeed: primary.gustSpeed,
     visibility: primary.visibility,
     roadStationName: nearestRoad.name,
+    roadMilepostKm: nearestRoad.milepostKm ?? null,
     roadDistanceKm: nearestRoad.distanceKm,
     roadTemp: nearestRoad.roadTemp,
     surfaceCode: nearestRoad.surfaceCode,
     surfaceState: nearestRoad.surfaceState,
     bridgeStationName: nearestBridge ? nearestBridge.name : null,
+    bridgeMilepostKm: nearestBridge ? (nearestBridge.milepostKm ?? null) : null,
     bridgeDistanceKm: nearestBridge ? nearestBridge.distanceKm : null,
     bridgeRoadTemp: nearestBridge ? nearestBridge.roadTemp : null,
     bridgeSurfaceState: nearestBridge ? nearestBridge.surfaceState : null,
-    source: `기상청 도로기상관측망 (${primary.roadName || '무안광주대구선'} 14번 노선)`
+    source: `기상청 도로기상관측망 (고속국도 12호선 광주대구선 · API코드 14)`
   };
 }
 

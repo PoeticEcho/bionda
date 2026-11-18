@@ -21,14 +21,20 @@ test('광주대구선(14번) 도로기상관측 매분자료 파싱 및 8개 관
   assert.equal(stns[2].stationType, '목표(결빙)');
   assert.equal(stns[2].temp, null);
   assert.equal(stns[2].roadTemp, 11.6);
+  assert.equal(stns[0].milepostKm, 75.4);
+  assert.equal(stns[1].milepostKm, 115.3);
+  assert.equal(stns[2].milepostKm, 102.9);
 
   // 거창군남부(남상면: 35.644, 127.910) 매칭 검증
   const matched = matchRoadStation(35.644, 127.910, stns);
   assert.equal(matched.name, '남상졸음(도)');
   assert.ok(matched.distanceKm < 1.5);
+  assert.equal(matched.routeNo, '12');
+  assert.equal(matched.milepostKm, 115.3);
   assert.equal(matched.temp, 9.8);
   assert.equal(matched.roadTemp, 12.8);
   assert.equal(matched.bridgeStationName, '죽산천교(도)');
+  assert.equal(matched.bridgeMilepostKm, 102.9);
   assert.equal(matched.bridgeRoadTemp, 11.6);
 });
 
@@ -128,5 +134,76 @@ test('스냅샷 및 공개 파일에 API 키 평문이 절대 포함되지 않�
     if (process.env.KMA_SERVICE_KEY && process.env.KMA_SERVICE_KEY !== 'dummy-do-not-expose') {
       assert.ok(!content.includes(process.env.KMA_SERVICE_KEY));
     }
+  }
+});
+
+test('analyze() horizonRanges는 향후 3시간(1~3h), 3~6시간(4~6h), 향후 6~12시간(7~12h) 비중복 구간으로 분리 판정한다', () => {
+  const base = Date.UTC(2026, 10, 18, 9, 0, 0);
+  const pad = x => String(x).padStart(2, '0');
+  const kstHours = Array.from({ length: 12 }, (_, i) => {
+    const d = new Date(base + (i + 1) * 3600000 + 9 * 3600000);
+    const t = `${d.getUTCFullYear()}-${pad(d.getUTCMonth() + 1)}-${pad(d.getUTCDate())}T${pad(d.getUTCHours())}:00:00+09:00`;
+    // Rain ONLY at offset 8 (within 6~12h window)
+    const wet = i + 1 === 8;
+    return { offset: i + 1, wet, risk: false, type: wet ? '비' : '없음', chance: wet ? 80 : 10, time: t };
+  });
+  const a = analyze(kstHours, { wet: false });
+  assert.equal(a.horizonRanges.length, 3);
+  assert.equal(a.horizonRanges[0].label, '향후 3시간');
+  assert.equal(a.horizonRanges[0].hasPrecipitation, false);
+  assert.equal(a.horizonRanges[1].label, '3~6시간');
+  assert.equal(a.horizonRanges[1].hasPrecipitation, false);
+  assert.equal(a.horizonRanges[2].label, '향후 6~12시간');
+  assert.equal(a.horizonRanges[2].hasPrecipitation, true);
+  assert.deepEqual(a.horizonRanges[2].kinds, ['비']);
+});
+
+test('iceOutlook은 6시간 판단 창을 유지하며 시동ON·예비살포 stageId 및 PC/모바일 칩(pcChip/mobChip)을 생성한다', async () => {
+  const { iceOutlook } = await import('../public/ice.js');
+  // 0~6h warm/clear, only hour +8 freezing -> must stay rank 0 in 6h horizon
+  const rowsWarmAndLateFreeze = Array.from({ length: 10 }, (_, i) => ({
+    time: `2026-11-18T${String(15 + i).padStart(2, '0')}:00`,
+    temp: i < 7 ? 8.5 : -2.0,
+    humidity: 70,
+    wind: 2.0,
+    precip: i < 7 ? 0 : 1.0,
+    snow: 0,
+    pop: i < 7 ? 10 : 80,
+    code: i < 7 ? 0 : 71
+  }));
+  const calmRes = iceOutlook(
+    { time: '2026-11-18T14:00', temp: 9.0, humidity: 65, wind: 2.0, precip: 0, code: 0 },
+    [],
+    rowsWarmAndLateFreeze,
+    { roadTemp: 9.5, surfaceCode: 1, todayPrecip: 0 },
+    []
+  );
+  assert.equal(calmRes.rank, 0);
+  assert.equal(calmRes.decisionCards.filter(c => c.state !== 'idle').length, 0);
+
+  // Sub-zero road & snow at hour +3 within 6h horizon -> active cards with pcChip & mobChip
+  const rowsFreeze3h = Array.from({ length: 6 }, (_, i) => ({
+    time: `2026-11-18T${String(15 + i).padStart(2, '0')}:00`,
+    temp: i < 2 ? 2.5 : -1.8,
+    humidity: 88,
+    wind: 3.1,
+    precip: i < 2 ? 0 : 1.2,
+    snow: i < 2 ? 0 : 1.5,
+    pop: i < 2 ? 20 : 90,
+    code: i < 2 ? 3 : 73
+  }));
+  const urgentRes = iceOutlook(
+    { time: '2026-11-18T14:00', temp: 2.5, humidity: 82, wind: 2.5, precip: 0, code: 3 },
+    [],
+    rowsFreeze3h,
+    { roadTemp: 0.4, surfaceCode: 2, todayPrecip: 0.5 },
+    []
+  );
+  assert.equal(urgentRes.rank, 2);
+  const active = urgentRes.decisionCards.filter(c => c.state === 'urgent' || c.state === 'watch');
+  assert.ok(active.length >= 2);
+  for (const c of active) {
+    assert.ok(c.stageId);
+    assert.ok(c.pcChip && c.mobChip);
   }
 });
