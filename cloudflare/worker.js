@@ -36,7 +36,8 @@ import {
   extractZipTextEntries,
   parseRoadRiskCsv,
   buildRoadRiskPayload,
-  matchStationRiskForCoord
+  matchStationRiskForCoord,
+  collectShortTerm12
 } from '../lib/bionda-core.js';
 
 const SHARED_CACHE = new Map();
@@ -218,6 +219,27 @@ async function forecast(env, lat, lon) {
     fetchWithFallback(env, 'getUltraSrtNcst', grid, baseObservation(now), 60)
   ]);
   return buildForecastResult(grid, now, requests);
+}
+
+async function fetchShortTerm12(env) {
+  const apiKey = getServiceKey(env);
+  if (!apiKey) throw new Error('KMA_SERVICE_KEY 미설정');
+  const now = Date.now();
+  const sBase = baseShort(now);
+  const uBase = baseUltra(now);
+  const cacheKey = `short12|${datePart(sBase)}|${timePart(sBase)}|${timePart(uBase)}`;
+  const hit = getCached(cacheKey);
+  if (hit) return hit;
+
+  return withInFlight(cacheKey, async () => {
+    const payload = await collectShortTerm12({
+      now,
+      fetchShort: (grid) => fetchWithFallback(env, 'getVilageFcst', grid, sBase, 180),
+      fetchUltra: async (grid) => ({ items: await fetchKma(env, 'getUltraSrtFcst', grid, uBase, 6000), base: isoKst(uBase) })
+    });
+    setCached(cacheKey, payload, 15 * 60000);
+    return payload;
+  });
 }
 
 async function fetchRoadStations(env, line = getRoadLineCode(env)) {
@@ -475,6 +497,22 @@ export default {
         const value = await forecast(env, lat, lon);
         const res = jsonResponse(request, env, 200, value, {
           'Cache-Control': 'public, max-age=60, s-maxage=300, stale-while-revalidate=600'
+        });
+        putEdgeCache(ctx, cacheKeyReq, res);
+        return res;
+      } catch (e) {
+        return jsonResponse(request, env, 502, { error: errMessage(e) });
+      }
+    }
+
+    if (pathname === '/api/short-term-12') {
+      if (!getServiceKey(env)) {
+        return jsonResponse(request, env, 503, { code: 'KEY_MISSING', error: '운영자가 기상청 예보 API 키를 등록하지 않았습니다.' });
+      }
+      try {
+        const value = await fetchShortTerm12(env);
+        const res = jsonResponse(request, env, 200, value, {
+          'Cache-Control': 'public, max-age=600, s-maxage=900, stale-while-revalidate=1800'
         });
         putEdgeCache(ctx, cacheKeyReq, res);
         return res;

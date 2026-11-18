@@ -127,11 +127,20 @@ test('Cloudflare Worker는 CORS·OPTIONS·health·도로관측(중복 Ncst 생�
       return { ok: true, status: 200, arrayBuffer: async () => rawBuf };
     }
     if (u.includes('VilageFcstInfoService_2.0/')) {
-      const resName = new URL(u).pathname.split('/').at(-1);
+      const parsedU = new URL(u);
+      const resName = parsedU.pathname.split('/').at(-1);
+      const nx = parsedU.searchParams.get('nx');
+      const items = mkItems(resName);
+      if (nx === '74') {
+        for (const it of items) {
+          if (it.category === 'TMP' || it.category === 'T1H') it.fcstValue = '-2.0';
+          if (it.category === 'PTY' && it.fcstValue === '1') it.fcstValue = '3';
+        }
+      }
       return {
         ok: true,
         status: 200,
-        text: async () => JSON.stringify({ response: { header: { resultCode: '00', resultMsg: 'OK' }, body: { items: { item: mkItems(resName) } } } })
+        text: async () => JSON.stringify({ response: { header: { resultCode: '00', resultMsg: 'OK' }, body: { items: { item: items } } } })
       };
     }
     if (u.includes('nph-rdr_cmp1_img')) {
@@ -192,6 +201,18 @@ test('Cloudflare Worker는 CORS·OPTIONS·health·도로관측(중복 Ncst 생�
     assert.equal(fcst.ok, true);
     assert.equal(fcst.hours.length, 12);
     assert.ok(!JSON.stringify(fcst).includes('worker-secret-test-key'));
+
+    // Short-term 12-area single API call
+    const s12Res = await worker.fetch(new Request('https://bionda-api.workers.dev/api/short-term-12'), env);
+    assert.equal(s12Res.status, 200);
+    const s12 = await s12Res.json();
+    assert.equal(s12.ok, true);
+    assert.equal(s12.regions.length, 12);
+    assert.equal(s12.uniqueGridCount, 12);
+    assert.equal(s12.windowKPIs.h12.wetRegions, 12);
+    assert.ok(s12.windowKPIs.h12.freezingRegions >= 1);
+    assert.ok(s12.windowKPIs.h12.overlapRegions >= 1);
+    assert.ok(!JSON.stringify(s12).includes('worker-secret-test-key'));
 
     // Warnings (EUC-KR decoding verification!)
     const wrnRes = await worker.fetch(new Request('https://bionda-api.workers.dev/api/warnings?name=' + encodeURIComponent('거창군남부') + '&lat=35.644&lon=127.910'), env);

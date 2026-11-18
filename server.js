@@ -42,7 +42,8 @@ const {
   extractZipTextEntries,
   parseRoadRiskCsv,
   buildRoadRiskPayload,
-  matchStationRiskForCoord
+  matchStationRiskForCoord,
+  collectShortTerm12
 } = core;
 
 // Load local .env if present and not already loaded
@@ -192,6 +193,26 @@ async function forecast(lat, lon) {
     fetchWithFallback('getUltraSrtNcst', grid, baseObservation(now), 60)
   ]);
   return buildForecastResult(grid, now, requests);
+}
+
+async function fetchShortTerm12() {
+  if (!getServiceKey()) throw new Error('KMA_SERVICE_KEY 미설정');
+  const now = Date.now();
+  const sBase = baseShort(now);
+  const uBase = baseUltra(now);
+  const cacheKey = `short12|${datePart(sBase)}|${timePart(sBase)}|${timePart(uBase)}`;
+  const hit = getCached(cacheKey);
+  if (hit) return hit;
+
+  return withInFlight(cacheKey, async () => {
+    const payload = await collectShortTerm12({
+      now,
+      fetchShort: (grid) => fetchWithFallback('getVilageFcst', grid, sBase, 180),
+      fetchUltra: async (grid) => ({ items: await fetchKma('getUltraSrtFcst', grid, uBase, 6000), base: isoKst(uBase) })
+    });
+    setCached(cacheKey, payload, 15 * 60000);
+    return payload;
+  });
 }
 
 async function fetchRoadStations(line = ROAD_LINE_CODE) {
@@ -400,7 +421,7 @@ async function serve(req, res, pathname) {
     const data = await fs.readFile(file);
     res.writeHead(200, {
       'Content-Type': TYPES[path.extname(file)] || 'application/octet-stream',
-      'Cache-Control': safe === '/index.html' ? 'no-cache' : 'public, max-age=300'
+      'Cache-Control': safe === '/index.html' || safe === '/hourly.html' ? 'no-cache' : 'public, max-age=300'
     });
     res.end(data);
   } catch {
@@ -454,6 +475,16 @@ const server = http.createServer(async (req, res) => {
       try {
         const value = await forecast(lat, lon);
         return sendJson(res, 200, value, { 'Cache-Control': 'public, max-age=60, s-maxage=300, stale-while-revalidate=600' });
+      } catch (e) {
+        return sendJson(res, 502, { error: errMessage(e) });
+      }
+    }
+
+    if (pathname === '/api/short-term-12') {
+      if (!getServiceKey()) return sendJson(res, 503, { code: 'KEY_MISSING', error: '운영자가 기상청 예보 API 키를 등록하지 않았습니다.' });
+      try {
+        const value = await fetchShortTerm12();
+        return sendJson(res, 200, value, { 'Cache-Control': 'public, max-age=600, s-maxage=900, stale-while-revalidate=1800' });
       } catch (e) {
         return sendJson(res, 502, { error: errMessage(e) });
       }
@@ -609,6 +640,7 @@ module.exports = {
   analyze,
   grouped,
   forecast,
+  fetchShortTerm12,
   getObservationForPlace,
   fetchRoadRisk,
   parseRoadStations,

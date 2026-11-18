@@ -418,3 +418,37 @@ test('무안광주대구선(012) 위험수준 격상 판정(0→2, 0→3, 1→2,
     global.localStorage = prevStorage;
   }
 });
+
+test('12개 읍·면·동 1시간 단기예보(SHORT_TERM_12_REGIONS), 강수·영하·동시겹침 요약 및 내장 KMA 아이콘을 검증한다', async () => {
+  const core = require('../lib/bionda-core');
+  const { getKmaIconInfo, renderKmaIconSvg, renderWindArrowSvg } = await import('../public/kma-icons.js');
+
+  assert.equal(core.SHORT_TERM_12_REGIONS.length, 12);
+  assert.ok(core.SHORT_TERM_12_REGIONS.some(r => r.county === '고령군' && r.name === '대가야읍'));
+  assert.equal(new Set(core.SHORT_TERM_12_REGIONS.map(r => `${r.grid.nx},${r.grid.ny}`)).size, 12);
+  assert.deepEqual(core.SHORT_TERM_12_REGIONS.map(r => r.routeOrder).sort((a, b) => a - b), [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12]);
+
+  const sampleHours = [
+    { offset: 0, time: '2026-11-19T01:00:00+09:00', temp: 2, wet: false, pop: 20, rainMm: 0, snowCm: 0, wind: 1.5 },
+    { offset: 1, time: '2026-11-19T02:00:00+09:00', temp: -1, wet: false, pop: 30, rainMm: 0, snowCm: 0, wind: 2.1 },
+    { offset: 2, time: '2026-11-19T03:00:00+09:00', temp: -2, wet: true, pop: 80, rainMm: 1.2, snowCm: 0.5, wind: 4.3 },
+    { offset: 3, time: '2026-11-19T04:00:00+09:00', temp: 1, wet: true, pop: 70, rainMm: 0.5, snowCm: 0, wind: 3.0 }
+  ];
+  const sum = core.summarizeHourlyWindow(sampleHours);
+  assert.equal(sum.wetHours, 2);
+  assert.equal(sum.firstWetTime, '2026-11-19T03:00:00+09:00');
+  assert.equal(sum.freezingHours, 2);
+  assert.equal(sum.firstFreezingTime, '2026-11-19T02:00:00+09:00');
+  assert.equal(sum.overlapHours, 1);
+  assert.equal(sum.firstOverlapTime, '2026-11-19T03:00:00+09:00');
+  assert.equal(sum.minTemp, -2);
+  assert.equal(sum.maxTemp, 2);
+  assert.equal(sum.maxPop, 80);
+
+  assert.equal(getKmaIconInfo({ sky: '1', pty: '0', isNight: false }).code, 'NB01');
+  assert.equal(getKmaIconInfo({ sky: '1', pty: '0', isNight: true }).code, 'NB02');
+  assert.equal(getKmaIconInfo({ sky: '3', pty: '0', isNight: true }).code, 'NB06');
+  assert.equal(getKmaIconInfo({ sky: '4', pty: '3', isNight: false }).code, 'NB11');
+  assert.ok(renderKmaIconSvg({ sky: '4', pty: '1', isNight: false }).includes('<svg'));
+  assert.ok(renderWindArrowSvg(315).includes('rotate('));
+});

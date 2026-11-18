@@ -26,14 +26,26 @@ async function main() {
   const outDir = path.join(__dirname, '..', 'public', 'api');
   await fs.mkdir(outDir, { recursive: true });
 
-  const [roadRes, roadRiskRes] = await Promise.all([
+  const [roadRes, roadRiskRes, short12Res] = await Promise.all([
     fetch(`${base}/api/road-obs?line=14`),
-    fetch(`${base}/api/road-risk?roadNum=012`)
+    fetch(`${base}/api/road-risk?roadNum=012`),
+    fetch(`${base}/api/short-term-12`)
   ]);
   const roadData = roadRes.ok ? await roadRes.json() : { stations: [] };
   const roadRisk = roadRiskRes.ok ? await roadRiskRes.json() : null;
+  const short12 = short12Res.ok ? await short12Res.json() : null;
   if (roadRisk?.ok) {
     console.log(`[검증완료] 고속국도 012호선 도로위험기상(FRG/FOG) ${roadRisk.tmKst?.slice(11, 16) || roadRisk.tmUtc} 기준 · 최고 살얼음=${roadRisk.corridorSummary?.iceLabel}(${roadRisk.corridorSummary?.maxIce}단계)`);
+  }
+  if (short12?.ok) {
+    const s12Str = JSON.stringify(short12, null, 2);
+    const secret = process.env.KMA_SERVICE_KEY || '';
+    if (secret && s12Str.includes(secret)) {
+      throw new Error('보안 오류: short-term-12 스냅샷에 API 키가 포함되어 있습니다!');
+    }
+    await fs.writeFile(path.join(outDir, 'short-term-12.json'), s12Str, 'utf8');
+    const k12 = short12.windowKPIs?.h12 || {};
+    console.log(`[검증완료] 12개 지역 1시간 단기예보 저장 완료 (${short12.regions?.length}곳, 12h 강수=${k12.wetRegions ?? 0}곳, 영하=${k12.freezingRegions ?? 0}곳, 겹침=${k12.overlapRegions ?? 0}곳)`);
   }
 
   const observations = {};
