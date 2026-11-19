@@ -41,6 +41,11 @@ import {
   parseOverviewPlacesParam,
   canonicalOverviewPlacesKey
 } from '../lib/bionda-core.js';
+import {
+  CCTV_CACHE_TTL_SECONDS,
+  buildCctvPayload,
+  isCctvConfigured
+} from '../lib/cctv-its.js';
 
 const SHARED_CACHE = new Map();
 const INFLIGHT = new Map();
@@ -691,6 +696,7 @@ export default {
         forecastConfigured: !!getServiceKey(env),
         radarConfigured: !!getRadarKey(env),
         roadConfigured: !!getRoadKey(env),
+        cctvConfigured: isCctvConfigured(env),
         roadLine
       });
     }
@@ -702,6 +708,81 @@ export default {
     const clientIp = request.headers.get('cf-connecting-ip') || request.headers.get('x-forwarded-for') || 'unknown';
     if (!allow(clientIp)) {
       return jsonResponse(request, env, 429, { error: '요청이 너무 많습니다. 잠시 후 다시 이용해 주세요.' });
+    }
+
+    if (pathname === '/api/cctv') {
+      const refresh = requestUrl.searchParams.get('refresh') === '1' || requestUrl.searchParams.get('refresh') === 'true';
+      const cctvCacheKey = 'its-cctv-corridor';
+      const cctvEdgeReq = edgeCacheRequest(new URL(requestUrl.origin + '/api/cctv'), false);
+      const edgeCache = globalThis.caches?.default || null;
+
+      if (!refresh) {
+        const memHit = getCached(cctvCacheKey);
+        if (memHit) {
+          return jsonResponse(request, env, 200, { ...memHit, cache: 'HIT' }, {
+            'X-Cache': 'HIT',
+            'Cache-Control': `public, max-age=${CCTV_CACHE_TTL_SECONDS}`
+          });
+        }
+        if (edgeCache) {
+          try {
+            const cached = await edgeCache.match(cctvEdgeReq);
+            if (cached) {
+              const payload = await cached.json();
+              setCached(cctvCacheKey, payload, CCTV_CACHE_TTL_SECONDS * 1000);
+              return jsonResponse(request, env, 200, { ...payload, cache: 'HIT' }, {
+                'X-Cache': 'HIT',
+                'Cache-Control': `public, max-age=${CCTV_CACHE_TTL_SECONDS}`
+              });
+            }
+          } catch {}
+        }
+      }
+
+      let payload;
+      try {
+        payload = refresh
+          ? await buildCctvPayload(env)
+          : await withInFlight(cctvCacheKey, () => buildCctvPayload(env));
+      } catch (err) {
+        const code = (err && err.code) || 'UNKNOWN_ERROR';
+        const status = code === 'ITS_API_KEY_MISSING' ? 500 : 502;
+        return jsonResponse(
+          request,
+          env,
+          status,
+          {
+            ok: false,
+            error: code,
+            message: (err && err.message) || '알 수 없는 오류',
+            detail: (err && err.detail) || null,
+            hint:
+              code === 'ITS_API_KEY_MISSING'
+                ? 'Worker 시크릿 ITS_API_KEY를 설정한 뒤 다시 호출하세요. (wrangler secret put ITS_API_KEY)'
+                : 'Cloudflare Workers에서 openapi.its.go.kr:9443 연결이 막히는 경우가 있습니다. 그때는 NAS나 GitHub Actions에서 같은 JSON을 주기적으로 받아 KV/R2/정적 호스팅에 올리고, Worker 환경변수 CCTV_SOURCE_URL 에 그 주소를 지정하세요. (README_cctv.md 참고)',
+            at: new Date().toISOString()
+          },
+          { 'X-Cache': 'BYPASS' }
+        );
+      }
+
+      setCached(cctvCacheKey, payload, CCTV_CACHE_TTL_SECONDS * 1000);
+      if (edgeCache) {
+        const storable = new Response(JSON.stringify(payload), {
+          status: 200,
+          headers: {
+            'Content-Type': 'application/json; charset=utf-8',
+            'Cache-Control': `public, max-age=${CCTV_CACHE_TTL_SECONDS}`
+          }
+        });
+        putEdgeCache(ctx, cctvEdgeReq, storable);
+      }
+
+      const mode = refresh ? 'REFRESH' : 'MISS';
+      return jsonResponse(request, env, 200, { ...payload, cache: mode }, {
+        'X-Cache': mode,
+        'Cache-Control': `public, max-age=${CCTV_CACHE_TTL_SECONDS}`
+      });
     }
 
     // Check Edge Cache API (normalized radar key unless force / refreshShort / refreshUltra)

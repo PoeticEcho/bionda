@@ -8,6 +8,11 @@ const fsSync = require('node:fs');
 const path = require('node:path');
 const { URL } = require('node:url');
 const core = require('./lib/bionda-core');
+const {
+  CCTV_CACHE_TTL_SECONDS,
+  buildCctvPayload,
+  isCctvConfigured
+} = require('./lib/cctv-its');
 
 const {
   DATA_GO_KR_BASE,
@@ -624,7 +629,7 @@ const server = http.createServer(async (req, res) => {
   res.setHeader('Permissions-Policy', 'camera=(), microphone=(), geolocation=(self)');
   res.setHeader(
     'Content-Security-Policy',
-    "default-src 'self'; img-src 'self' data: blob: https://*.weather.go.kr; style-src 'self' 'unsafe-inline'; script-src 'self'; connect-src 'self' https://api.open-meteo.com https://ensemble-api.open-meteo.com https://geocoding-api.open-meteo.com https://www.weather.go.kr; frame-src https://embed.windy.com https://*.windy.com https://www.roadplus.co.kr https://*.roadplus.co.kr; base-uri 'self'; form-action 'self'; frame-ancestors 'none'"
+    "default-src 'self'; img-src 'self' data: blob: https://*.weather.go.kr; style-src 'self' 'unsafe-inline'; script-src 'self'; worker-src 'self' blob:; media-src 'self' blob: https: http:; connect-src 'self' https: http://127.0.0.1:* http://localhost:*; frame-src https://embed.windy.com https://*.windy.com https://www.roadplus.co.kr https://*.roadplus.co.kr; base-uri 'self'; form-action 'self'; frame-ancestors 'none'"
   );
   if (req.method === 'OPTIONS') {
     const requestUrl = new URL(req.url, 'http://localhost');
@@ -650,8 +655,48 @@ const server = http.createServer(async (req, res) => {
         forecastConfigured: !!getServiceKey(),
         radarConfigured: !!getRadarKey(),
         roadConfigured: !!getRoadKey(),
+        cctvConfigured: isCctvConfigured(process.env),
         roadLine: ROAD_LINE_CODE
       });
+    }
+
+    if (pathname === '/api/cctv') {
+      const refresh = requestUrl.searchParams.get('refresh') === '1' || requestUrl.searchParams.get('refresh') === 'true';
+      const cacheKey = 'its-cctv-corridor';
+      if (!refresh) {
+        const hit = getCached(cacheKey);
+        if (hit) {
+          return sendJson(res, 200, { ...hit, cache: 'HIT' }, {
+            'X-Cache': 'HIT',
+            'Cache-Control': `public, max-age=${CCTV_CACHE_TTL_SECONDS}`
+          });
+        }
+      }
+      try {
+        const payload = refresh
+          ? await buildCctvPayload(process.env)
+          : await withInFlight(cacheKey, () => buildCctvPayload(process.env));
+        setCached(cacheKey, payload, CCTV_CACHE_TTL_SECONDS * 1000);
+        const mode = refresh ? 'REFRESH' : 'MISS';
+        return sendJson(res, 200, { ...payload, cache: mode }, {
+          'X-Cache': mode,
+          'Cache-Control': `public, max-age=${CCTV_CACHE_TTL_SECONDS}`
+        });
+      } catch (err) {
+        const code = (err && err.code) || 'UNKNOWN_ERROR';
+        const status = code === 'ITS_API_KEY_MISSING' ? 500 : 502;
+        return sendJson(res, status, {
+          ok: false,
+          error: code,
+          message: (err && err.message) || '알 수 없는 오류',
+          detail: (err && err.detail) || null,
+          hint:
+            code === 'ITS_API_KEY_MISSING'
+              ? '환경변수 ITS_API_KEY를 설정한 뒤 다시 호출하세요. (README_cctv.md 참고)'
+              : '9443 포트가 막히는 경우 CCTV_SOURCE_URL 환경변수를 지정하세요. (README_cctv.md 참고)',
+          at: new Date().toISOString()
+        }, { 'X-Cache': 'BYPASS' });
+      }
     }
 
     if (pathname === '/api/forecast') {

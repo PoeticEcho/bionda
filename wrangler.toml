@@ -13,4 +13,6 @@ ROAD_LINE_CODE = "14"
 # - KMA_SERVICE_KEY (필수)
 # - KMA_RADAR_KEY   (선택, 미입력 시 KMA_SERVICE_KEY 공용)
 # - KMA_ROAD_KEY    (선택, 미입력 시 KMA_SERVICE_KEY 공용)
+# - ITS_API_KEY     (선택, /api/cctv 국가교통정보센터 ITS Open API 인증키)
+# - CCTV_SOURCE_URL (선택, 9443 포트 우회용 외부 CCTV JSON 주소)
 # - CORS_ORIGINS    (선택, 예: "https://poeticecho.github.io")
