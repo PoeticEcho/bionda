@@ -54,6 +54,16 @@ test('lib/cctv-its는 다양한 ITS JSON 구조(body.items.item, response.data, 
   assert.ok(built.stats.matchedLabels >= 4);
   assert.ok(built.stats.unmatchedLabels.includes('우명교'));
 
+  const { normalizeCctvItem } = require('../lib/cctv-its');
+  const upgraded = normalizeCctvItem({
+    cctvname: '[광주대구선] 논공교2',
+    cctvurl: 'http://cctvsec.ktict.co.kr/2812/sampleToken',
+    cctvformat: 'HLS',
+    coordx: '128.427',
+    coordy: '35.7683'
+  });
+  assert.equal(upgraded.url, 'https://cctvsec.ktict.co.kr/2812/sampleToken');
+
   const itsUrl = buildItsCctvUrl('TEST_KEY');
   assert.match(itsUrl, /^https:\/\/openapi\.its\.go\.kr:9443\/cctvInfo\?/);
   assert.match(itsUrl, /type=ex/);
