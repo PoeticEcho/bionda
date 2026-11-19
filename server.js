@@ -624,7 +624,7 @@ const server = http.createServer(async (req, res) => {
   res.setHeader('Permissions-Policy', 'camera=(), microphone=(), geolocation=(self)');
   res.setHeader(
     'Content-Security-Policy',
-    "default-src 'self'; img-src 'self' data: blob: https://*.weather.go.kr; style-src 'self' 'unsafe-inline'; script-src 'self'; connect-src 'self' https://api.open-meteo.com https://ensemble-api.open-meteo.com https://geocoding-api.open-meteo.com https://www.weather.go.kr; frame-src https://embed.windy.com https://*.windy.com; base-uri 'self'; form-action 'self'; frame-ancestors 'none'"
+    "default-src 'self'; img-src 'self' data: blob: https://*.weather.go.kr; style-src 'self' 'unsafe-inline'; script-src 'self'; connect-src 'self' https://api.open-meteo.com https://ensemble-api.open-meteo.com https://geocoding-api.open-meteo.com https://www.weather.go.kr; frame-src https://embed.windy.com https://*.windy.com https://www.roadplus.co.kr https://*.roadplus.co.kr; base-uri 'self'; form-action 'self'; frame-ancestors 'none'"
   );
   if (req.method === 'OPTIONS') {
     const requestUrl = new URL(req.url, 'http://localhost');
