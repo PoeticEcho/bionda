@@ -44,7 +44,8 @@ const {
   buildRoadRiskPayload,
   matchStationRiskForCoord,
   collectShortTerm12,
-  parseOverviewPlacesParam
+  parseOverviewPlacesParam,
+  canonicalOverviewPlacesKey
 } = core;
 
 // Load local .env if present and not already loaded
@@ -144,7 +145,11 @@ async function fetchKmaFromBase(baseUrl, resource, grid, base, rawKey, timeout =
   u.searchParams.set('nx', grid.nx);
   u.searchParams.set('ny', grid.ny);
   const r = await fetch(u, { signal: AbortSignal.timeout(timeout), headers: { Accept: 'application/json' } });
-  if (!r.ok) throw new Error(`기상청 응답 오류 HTTP ${r.status}`);
+  if (!r.ok) {
+    const err = new Error(`기상청 응답 오류 HTTP ${r.status}`);
+    err.status = r.status;
+    throw err;
+  }
   return parseKmaForecastJson(await r.text());
 }
 
@@ -152,24 +157,36 @@ async function fetchKma(resource, grid, base, timeout = 5000, bypassCache = fals
   const apiKey = getServiceKey();
   if (!apiKey) throw new Error('KMA_SERVICE_KEY 미설정');
   const cacheKey = `kma|${resource}|${grid.nx}|${grid.ny}|${datePart(base)}|${timePart(base)}`;
+  const staleKey = `kma-stale|${resource}|${grid.nx}|${grid.ny}`;
   const hit = !bypassCache ? getCached(cacheKey) : null;
   if (hit) return hit;
 
   return withInFlight(bypassCache ? `${cacheKey}|bypass` : cacheKey, async () => {
     const isApiHubKey = /^[A-Za-z0-9_-]{20,26}$/.test(apiKey.trim()) && !apiKey.includes('dummy');
+    const skipDataGoKr = isApiHubKey && Boolean(getCached('skip-host|data.go.kr'));
     const bases = isApiHubKey
-      ? [APIHUB_FCST_BASE, DATA_GO_KR_BASE]
+      ? (skipDataGoKr ? [APIHUB_FCST_BASE] : [APIHUB_FCST_BASE, DATA_GO_KR_BASE])
       : [DATA_GO_KR_BASE, APIHUB_FCST_BASE];
 
     let lastErr;
-    for (const baseUrl of bases) {
+    for (let i = 0; i < bases.length; i++) {
+      const baseUrl = bases[i];
+      if (isApiHubKey && baseUrl.includes('data.go.kr') && getCached('skip-host|data.go.kr')) {
+        continue;
+      }
+      const attemptTimeout = i > 0 ? Math.min(timeout, 3500) : timeout;
       try {
-        const items = await fetchKmaFromBase(baseUrl, resource, grid, base, apiKey, timeout);
+        const items = await fetchKmaFromBase(baseUrl, resource, grid, base, apiKey, attemptTimeout);
         const ttlMs = resource === 'getVilageFcst' ? 45 * 60000 : 5 * 60000;
+        const staleTtlMs = resource === 'getVilageFcst' ? 6 * 3600000 : 90 * 60000;
         setCached(cacheKey, items, ttlMs);
+        setCached(staleKey, { items, base: isoKst(base) }, staleTtlMs);
         return items;
       } catch (e) {
         lastErr = e;
+        if (isApiHubKey && baseUrl.includes('data.go.kr') && (e?.status === 401 || e?.status === 403 || /HTTP 40[13]/.test(errMessage(e)))) {
+          setCached('skip-host|data.go.kr', true, 60 * 60000);
+        }
       }
     }
     throw lastErr;
@@ -181,7 +198,13 @@ async function fetchWithFallback(resource, grid, base, prevMinutes, bypassCache 
   catch (error) {
     const previous = new Date(base.getTime() - prevMinutes * 60000);
     try { return { items: await fetchKma(resource, grid, previous, 5000, bypassCache), base: isoKst(previous), notice: '최신 발표분을 가져오지 못해 직전 발표분 사용' }; }
-    catch { throw error; }
+    catch {
+      const stale = getCached(`kma-stale|${resource}|${grid.nx}|${grid.ny}`);
+      if (stale?.items?.length) {
+        return { items: stale.items, base: stale.base, notice: '기상청 일시 지연으로 직전 수신 자료 사용', stale: true };
+      }
+      throw error;
+    }
   }
 }
 
@@ -374,7 +397,7 @@ async function fetchOverviewBundle({ placesParam = '', line = ROAD_LINE_CODE, ro
   const sBase = baseShort(now);
   const uBase = baseUltra(now);
   const oBase = baseObservation(now);
-  const bundleKey = `bundle|${line}|${roadNum}|${places.map(p => p.key).join('|')}|${timePart(uBase)}|${timePart(sBase)}`;
+  const bundleKey = `bundle|${line}|${roadNum}|${canonicalOverviewPlacesKey(places)}|${timePart(uBase)}|${timePart(sBase)}`;
   const hit = !force ? getCached(bundleKey) : null;
   if (hit) return hit;
 
@@ -482,22 +505,35 @@ async function fetchWrnNowList() {
   const key = getServiceKey();
   if (!key) return [];
   const cacheKey = 'kma-wrn-now';
+  const staleKey = 'kma-wrn-now-last-good';
   const hit = getCached(cacheKey);
   if (hit) return hit;
   return withInFlight(cacheKey, async () => {
-    const u = new URL('https://apihub.kma.go.kr/api/typ01/url/wrn_now_data.php');
-    u.searchParams.set('fe', 'f');
-    u.searchParams.set('tm', '');
-    u.searchParams.set('disp', '0');
-    u.searchParams.set('help', '2');
-    u.searchParams.set('authKey', deEncodedKey(key));
-    const r = await fetch(u, { signal: AbortSignal.timeout(9000) });
-    if (!r.ok) return [];
-    const buf = Buffer.from(await r.arrayBuffer());
-    const text = new TextDecoder('euc-kr').decode(buf);
-    const parsed = parseWrnNow(text);
-    setCached(cacheKey, parsed, 60000);
-    return parsed;
+    try {
+      const u = new URL('https://apihub.kma.go.kr/api/typ01/url/wrn_now_data.php');
+      u.searchParams.set('fe', 'f');
+      u.searchParams.set('tm', '');
+      u.searchParams.set('disp', '0');
+      u.searchParams.set('help', '2');
+      u.searchParams.set('authKey', deEncodedKey(key));
+      const r = await fetch(u, { signal: AbortSignal.timeout(6500) });
+      if (!r.ok) throw new Error(`KMA 특보 응답 오류 HTTP ${r.status}`);
+      const buf = Buffer.from(await r.arrayBuffer());
+      const text = new TextDecoder('euc-kr').decode(buf);
+      const parsed = parseWrnNow(text);
+      setCached(cacheKey, parsed, 90000);
+      setCached(staleKey, parsed, 20 * 60000);
+      return parsed;
+    } catch (e) {
+      const stale = getCached(staleKey);
+      if (stale) {
+        const out = [...stale];
+        Object.defineProperty(out, '_stale', { value: true, enumerable: false });
+        setCached(cacheKey, out, 45000);
+        return out;
+      }
+      throw e;
+    }
   });
 }
 
@@ -575,7 +611,7 @@ async function serve(req, res, pathname) {
       'Content-Type': TYPES[path.extname(file)] || 'application/octet-stream',
       'Cache-Control': safe === '/index.html' || safe === '/hourly.html' ? 'no-cache' : 'public, max-age=300'
     });
-    res.end(data);
+    res.end(req.method === 'HEAD' ? undefined : data);
   } catch {
     sendJson(res, 404, { error: '파일을 찾지 못했습니다.' });
   }
@@ -603,7 +639,7 @@ const server = http.createServer(async (req, res) => {
   const requestUrl = new URL(req.url, 'http://localhost');
   const pathname = requestUrl.pathname;
 
-  if (pathname.startsWith('/api/')) {
+  if (pathname.startsWith('/api/') && !/\.(?:json|png|jpe?g|webp|svg|txt)$/i.test(pathname)) {
     applyApiCors(req, res);
     const ip = getClientIp(req);
     if (!allow(ip)) return sendJson(res, 429, { error: '요청이 너무 많습니다. 잠시 후 다시 이용해 주세요.' });
@@ -731,19 +767,36 @@ const server = http.createServer(async (req, res) => {
     }
 
     if (pathname === '/api/warnings') {
+      const placesParam = (requestUrl.searchParams.get('places') || '').trim();
       const name = (requestUrl.searchParams.get('name') || '').trim();
       const latRaw = requestUrl.searchParams.get('lat');
       const lonRaw = requestUrl.searchParams.get('lon');
       const lat = latRaw !== null ? Number(latRaw) : NaN;
       const lon = lonRaw !== null ? Number(lonRaw) : NaN;
       try {
+        const parsedPlaces = placesParam ? parseOverviewPlacesParam(placesParam) : null;
+        if (placesParam && (!parsedPlaces || !parsedPlaces.length)) {
+          return sendJson(res, 400, { error: '조회할 유효한 국내 좌표가 없습니다.' });
+        }
         const all = await fetchWrnNowList();
+        const isStale = Boolean(all._stale);
         const hasSubZones = all.some(w => w.regUpKo && w.regKo !== w.regUpKo);
-        const capPolyMap = name && hasSubZones ? await getCapPolygonMap() : new Map();
+        const capPolyMap = (parsedPlaces || name) && hasSubZones ? await getCapPolygonMap() : new Map();
+        const cacheCtrl = isStale ? 'public, max-age=30, s-maxage=30' : 'public, max-age=55, s-maxage=90';
+        if (parsedPlaces) {
+          const items = {};
+          for (const p of parsedPlaces) {
+            items[p.key] = {
+              name: p.name,
+              warnings: sortWarnings(all.filter(w => warningMatchesPlace(w, p.name, p.lat, p.lon, capPolyMap)))
+            };
+          }
+          return sendJson(res, 200, { ok: true, mode: 'batch', updatedAt: new Date().toISOString(), stale: isStale, items, totalNational: all.length }, { 'Cache-Control': cacheCtrl });
+        }
         const matched = name
           ? all.filter(w => warningMatchesPlace(w, name, lat, lon, capPolyMap))
           : all;
-        return sendJson(res, 200, { ok: true, updatedAt: new Date().toISOString(), warnings: sortWarnings(matched), totalNational: all.length });
+        return sendJson(res, 200, { ok: true, updatedAt: new Date().toISOString(), stale: isStale, warnings: sortWarnings(matched), totalNational: all.length }, { 'Cache-Control': cacheCtrl });
       } catch (e) {
         return sendJson(res, 502, { error: errMessage(e) });
       }

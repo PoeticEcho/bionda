@@ -6,6 +6,15 @@ import worker from '../../cloudflare/worker.js';
  * - Pages 단독 환경변수만 설정된 경우 동일한 worker 모듈을 직접 실행
  */
 export async function onRequest(context) {
+  const method = String(context.request?.method || 'GET').toUpperCase();
+  if ((method === 'GET' || method === 'HEAD') && typeof context.next === 'function') {
+    try {
+      const { pathname } = new URL(context.request.url);
+      if (/\.(?:json|png|jpe?g|webp|svg|txt)$/i.test(pathname)) {
+        return context.next();
+      }
+    } catch {}
+  }
   if (context.env?.API_WORKER && typeof context.env.API_WORKER.fetch === 'function') {
     return context.env.API_WORKER.fetch(context.request);
   }

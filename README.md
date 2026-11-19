@@ -43,11 +43,11 @@
 | **초단기실황** | `VilageFcstInfoService_2.0/getUltraSrtNcst` | **매시 정시(`HH:00`)** · +25분 제공 | `kma\|...` **5분** | `/api/forecast` `300s` | 도로관측 결측·노선 외 지점만 호출 |
 | **초단기예보** | `VilageFcstInfoService_2.0/getUltraSrtFcst` | **매시 `:30` 기준** · **`:35~:45`분 공개** | `kma\|...` **5분** | **동적 cap** (`:35` 경계 · 정시 · 미공개 시 `45s`) | `+1~+6시간` 1시간 단위 실예측 |
 | **단기예보** | `VilageFcstInfoService_2.0/getVilageFcst` | **일 8회(`02,05,08,11,14,17,20,23`시)** · +20분 공개 | `kma\|...` **45분** | 정시/`35분` 경계 이하 (`max 300s`) | 오늘~모레(~48h) `TMP/POP/SKY/PTY/PCP/SNO/LGT` |
-| **기상특보 + 폴리곤** | `wrn_now_data.php` + `weather.go.kr/w/rss/cap/warning.do` | 수시 발표 (특보 텍스트 + CAP XML) | `wrn` **60초** · CAP **120초** (개별 XML 30분) | `60s / 90s` | 세부구역(`함양서북부` 등) 좌표 교차 판정 |
+| **기상특보 + 폴리곤** | `wrn_now_data.php` + `weather.go.kr/w/rss/cap/warning.do` | 수시 발표 (특보 텍스트 + CAP XML) | `wrn` **90초** (장애 시 stale **20분**) · CAP **120초** | `55s / 90s` (`stale` 시 `30s`) | 단건(`name`) + **일괄(`places`) 1회 조회** · CAP 폴리곤 교차 판정 |
 | **레이더 영상** | `apihub.../nph-rdr_cmp1_img` (HSR 합성) | **5분마다** | **4분** | `240s` (파라미터 `t` 정규화) | 매직바이트 검증 후 바이너리 응답 |
 | **Open-Meteo 보조** | `/api/open-meteo` (`forecast`, `ensemble` `icon_seamless`) | 1시간 / 모델 주기 | `forecast` 5분 · `ensemble` **30분** | `300s` / `1800s` | 다중좌표 일괄 1회 호출, `429` 시 15분 쿨다운 |
-| **통합 번들 (`index`)** | `/api/overview-bundle` | 요청 시 조합 | **90초** | `60s / 90s` (`force=1` 시 `no-store`) | 8지역 관측·예보·특보·도로·012위험 **1회 통합** |
-| **12지역 단기 (`hourly`)** | `/api/short-term-12` | 요청 시 조합 | **5분** (초단기 대기 중 **45초**) | `max 300s` (정시·`:35` 초과 불가, 대기 중 **45s**) | 12개소 → 고유 **11격자** 중복제거 병렬 조회 |
+| **통합 번들 (`index`)** | `/api/overview-bundle` | 요청 시 조합 | **90초** | `60s / 90s` (`force=1` 시 `no-store`) | 8지역 관측·예보·특보·도로·012위험 **1회 통합** (좌표 정렬 캐시키) |
+| **12지역 단기 (`hourly`)** | `/api/short-term-12` | 요청 시 조합 | **5분** (초단기 대기 중 **45초**) | `max 300s` (정시·`:35` 초과 불가, 대기 중 **45s**) | 12개소 → 고유 **11격자** 3격자씩 분할 병렬 조회 |
 
 ---
 
@@ -58,7 +58,7 @@
   - 최근 응답을 `localStorage`(`weather-watch:cache:overview:v1`) 및 백엔드 상태 캐시(`weather-watch:cache:health:v1`)에 보관합니다.
   - 단기예보 등 다른 페이지를 오갔을 때 **5분 이내·동일 KST 정시**라면 `0ms` 즉시 복원하고 불필요한 API 재호출을 생략하며, 해당 화면에 **3분 이상 머무르면** 백그라운드에서 조용히 최신화(SWR)합니다. (5분~20분 경과 또는 정시 변경 시에도 직전 값을 먼저 표출한 채 즉시 백그라운드 갱신)
 - **매 5분(`300,000ms`)**: `!document.hidden`일 때 백그라운드 `refresh({ silent: true })` 실행 → `bundle`(90초 TTL) 및 `road-obs`(2분 TTL)가 만료되어 매 5분마다 **항상 최신 1분 도로관측 및 5분 도로위험**을 수신합니다.
-- **매 1분(`60,000ms`)**: `pollWarnings()` 특보 변동 감시 및 등급 상승 시 상단 토스트 + Web Audio 경보음/기기 알림.
+- **매 2분(`120,000ms`)**: `!document.hidden`일 때 `pollWarnings()`가 전 지점을 `/api/warnings?places=...` **단일 일괄 호출**로 감시(직전 번들이 105초 내 이미 수신했으면 중복 생략)하고, 특보 등급 상승 시 상단 토스트 + Web Audio 경보음/기기 알림을 발동합니다.
 - **탭 복귀(`visibilitychange`)**: 화면 WakeLock 재획득 + 마지막 라이브 동기화 기준 **5분 경과 또는 정시 변경 시**에만 `refresh()` 수행(짧은 탭 전환 시 중복 호출 방지).
 - **상단/상세 `[↻ 새로고침]` (`refresh(true)`)**: `force=1`로 Edge·Worker 메모리 캐시(`bundle`, `road-obs`) 및 Open-Meteo `forecast` 캐시를 즉시 우회하여 재조회합니다.
 
@@ -68,7 +68,7 @@ KMA 초단기예보는 매시 정각이 아닌 **`HH:30` 발표분(`HH:35~:45` A
 1. **페이지 전환 0ms 로컬 캐시 · 3분 머무름 SWR**: `localStorage`(`weather-watch:cache:hourly:v1`)가 **5분 이내 · 동일 KST 정시 · 초단기 신규 발표 전**이면 즉시 렌더링해 전환 지연을 없애고, **3분 이상 머무르면** 백그라운드에서 조용히 최신화합니다.
 2. **정시 롤오버 (`scheduleTopOfHourRefresh`)**: 매시 `HH:00:01.5 KST`에 `?force=1&refreshShort=1&refreshUltra=1`로 호출해 표의 시간축(`06시~` → `07시~`)을 정각에 즉시 전환(백그라운드 절전 시 `visibilitychange` + 1분 체크로 즉시 보정).
 3. **초단기 신규 발표 픽업 (`scheduleUltraPickupRefresh`)**: 매시 **`HH:36:15 KST`**에 `refreshUltra=1`로 자동 호출하여 방금 공개된 `HH:30` 초단기예보를 즉시 반영.
-4. **10분 주기 갱신 (`600,000ms`)**: `isUltraUpdateDue()`(`ultraBase + 66분` 경과 여부, 예: `05:30` 자료 유지 상태에서 `06:36` 도달)를 검사해 신규 발표 시각이 지났으면 자동으로 `force=1&refreshUltra=1` 우회 조회합니다.
+4. **10분 주기 갱신 (`600,000ms`, visible 탭 한정)**: `isUltraUpdateDue()`(`ultraBase + 66분` 경과 여부, 예: `05:30` 자료 유지 상태에서 `06:36` 도달)를 검사해 신규 발표 시각이 지났으면 자동으로 `force=1&refreshUltra=1` 우회 조회합니다.
 5. **상단 `[↻ 새로고침]` 수동 클릭 규칙 (`computeManualRefreshFlags`)**:
    - **단기예보 (`refreshShort`)**: 현재 표시된 `shortBase`로부터 **3시간(180분) 이상** 경과 시 Worker `getVilageFcst` 11격자 캐시까지 완전히 우회해 강제 재조회 (`3시간 미만`이면 Worker 격자 캐시 활용).
    - **초단기예보 (`refreshUltra`)**: 현재 표시된 `ultraBase`로부터 **10분 초과** 경과 시 Worker `getUltraSrtFcst` 11격자 캐시까지 완전히 우회해 기상청 직접 재조회 (`force=1`로 Cloudflare Edge Cache는 항상 우회).
@@ -101,12 +101,12 @@ KMA 초단기예보는 매시 정각이 아닌 **`HH:30` 발표분(`HH:35~:45` A
 
 운영·개발 중 실제 발생했던 이슈와 재발 방지를 위한 핵심 체크포인트입니다.
 
-1. **`workers.dev` 사내망 차단 대응 (`Pages Functions` 프록시)**
-   - *이슈*: 사내·기관 네트워크 방화벽에서 `*.workers.dev` TLS 연결이 차단되나 Cloudflare `*.pages.dev`는 정상 통과함.
-   - *해결*: [`functions/api/[[path]].js`](functions/api/%5B%5Bpath%5D%5D.js)가 Service Binding(`env.API_WORKER`)으로 Worker `bionda`를 내부 라우팅하며, `DEFAULT_API_BASE`는 `https://bionda.pages.dev`를 기본 사용합니다. Cloudflare 대시보드 Pages 설정에서 `API_WORKER → bionda` 바인딩을 유지해야 합니다.
-2. **Cloudflare Workers 50 서브요청(Subrequest) 한도 관리**
-   - *이슈*: 브라우저에서 지점별 `/api/forecast` + `/api/observation`을 다수 호출하거나 Worker 1요청 내에서 KMA API를 중복 호출하면 `Too many subrequests` 오류 발생.
-   - *해결*: ① 메인 화면 8지역을 `/api/overview-bundle` **1회 호출**로 통합, ② 14호선 도로관측 매칭 성공 시 중복 `getUltraSrtNcst` 생략, ③ `hourly`는 `(77,86)` 중복 제거로 **고유 11격자만 조회**(단기 11 + 초단기 11 = 22 서브요청, 재시도 여유 충분). 향후 감시 지역을 15개 이상으로 늘릴 경우 청크 분할 또는 별도 엔드포인트 분리가 필요합니다.
+1. **`workers.dev` 사내망 차단 대응 (`Pages Functions` 프록시 + 정적 자산 패스스루)**
+   - *이슈*: 사내·기관 네트워크 방화벽에서 `*.workers.dev` TLS 연결이 차단되나 Cloudflare `*.pages.dev`는 정상 통과함. 단, 초기 `[[path]].js`가 `/api/*` 전체를 Worker로 넘겨 `public/api/*.json`·`radar.png` 정적 스냅샷이 `bionda.pages.dev`에서 `404`가 되는 문제가 있었음.
+   - *해결*: [`functions/api/[[path]].js`](functions/api/%5B%5Bpath%5D%5D.js)가 정적 자산 확장자(`.json`, `.png`, `.jpg` 등)는 `context.next()`로 통과시키고 동적 API만 Service Binding(`env.API_WORKER`)으로 Worker `bionda`에 0ms 내부 RPC 전달합니다. `DEFAULT_API_BASE`는 `https://bionda.pages.dev`를 기본 사용합니다.
+2. **Cloudflare Workers 무료 한도(6 동시연결 · 50 서브요청 · 일 10만 req) & 타임아웃 연쇄 방어**
+   - *이슈*: ① 콜드 조회 시 6개 초과 동시 아웃바운드 연결이 큐에서 대기하다 5초 타임아웃에 걸리고, ② ApiHub 전용 키로 `data.go.kr` HTTP 403 폴백을 불필요하게 재시도하며, ③ `pollWarnings()`가 분당 8회 호출 + `502` 시 CAP 18 XML 연쇄 호출을 유발함.
+   - *해결*: ① `collectShortTerm12`(`3격자` 단위) 및 `fetchOverviewBundle`(`2격자` 단위) 분할로 6연결 한도 내 타임아웃 방지, ② ApiHub 키의 `data.go.kr` `401/403` 응답 60분 스킵 캐싱 + KMA 직전 수신 `kma-stale`·특보 `wrn-now` 20분 stale 복원, ③ 특보 `/api/warnings?places=...` **1회 일괄 통합 + 2분 주기**(CAP fallback 3분 쿨다운) 및 `/api/overview-bundle`·`places` 좌표 정렬 정규화로 Edge 캐시 공유율 극대화, ④ 프런트 `overview-bundle`/`short-term-12` 타임아웃을 `26초`로 상향해 콜드 완료 전 조기 중단(`status: 0`) 차단.
 3. **`hourly`와 기상청 날씨누리 단기예보 값 차이**
    - *이슈*: 단기예보(`getVilageFcst`, 3시간마다 발표)만 사용하면 향후 6시간 이내 기온·강수가 날씨누리 상세 화면과 다름.
    - *해결*: 날씨누리처럼 `+1~+6시간` 구간은 **`getUltraSrtFcst`(초단기예보)** 를 우선 덮어쓰고, 전 격자 시작 시각을 `uniformStartK`로 맞췄습니다.

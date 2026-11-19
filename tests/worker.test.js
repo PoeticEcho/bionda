@@ -273,3 +273,268 @@ test('Cloudflare Worker는 CORS·OPTIONS·health·도로관측(중복 Ncst 생�
   const stHealth = await standaloneMod.default.fetch(new Request('https://bionda-api.workers.dev/api/health'), env);
   assert.equal(stHealth.status, 200);
 });
+
+test('Pages Gateway([[path]].js)는 정적 스냅샷 JSON·이미지를 context.next()로 통과시키고 API만 Worker로 전달한다', async () => {
+  const { onRequest } = await import(pathToFileURL(path.join(__dirname, '..', 'functions', 'api', '[[path]].js')).href);
+  const forwarded = [];
+  const nextCalled = [];
+
+  const makeCtx = (url, method = 'GET') => ({
+    request: new Request(url, { method }),
+    env: {
+      API_WORKER: {
+        fetch: async req => {
+          forwarded.push(new URL(req.url).pathname);
+          return new Response(JSON.stringify({ ok: true }), { status: 200 });
+        }
+      }
+    },
+    next: () => {
+      nextCalled.push(new URL(url).pathname);
+      return new Response('static-ok', { status: 200 });
+    },
+    waitUntil: () => {}
+  });
+
+  for (const staticPath of [
+    'https://bionda.pages.dev/api/snapshot.json',
+    'https://bionda.pages.dev/api/short-term-12.json',
+    'https://bionda.pages.dev/api/briefing.json',
+    'https://bionda.pages.dev/api/radar.png',
+    'https://bionda.pages.dev/api/briefing/goryeong-2026-11-19-0800.jpg'
+  ]) {
+    const res = await onRequest(makeCtx(staticPath));
+    assert.equal(res.status, 200);
+  }
+  assert.deepEqual(nextCalled, [
+    '/api/snapshot.json',
+    '/api/short-term-12.json',
+    '/api/briefing.json',
+    '/api/radar.png',
+    '/api/briefing/goryeong-2026-11-19-0800.jpg'
+  ]);
+  assert.equal(forwarded.length, 0);
+
+  await onRequest(makeCtx('https://bionda.pages.dev/api/health'));
+  await onRequest(makeCtx('https://bionda.pages.dev/api/kma-cap?file=KR.W2611108_202611181600_WWA_108_KR.xml'));
+  assert.deepEqual(forwarded, ['/api/health', '/api/kma-cap']);
+});
+
+test('Worker 일괄 특보(?places=), 특보 20분 stale 복구, 번들 순서 정규화, data.go.kr 403 차단을 검증한다', async () => {
+  const mod = await import(pathToFileURL(path.join(__dirname, '..', 'cloudflare', 'worker.js')).href);
+  const worker = mod.default;
+  mod.__resetWorkerCaches();
+
+  const env = { KMA_SERVICE_KEY: 'worker-secret-test-key', ROAD_LINE_CODE: '14' };
+  const beforeFetch = global.fetch;
+  const realDateNow = Date.now;
+  let nowOffset = 0;
+  Date.now = () => realDateNow() + nowOffset;
+
+  let wrnFail = false;
+  const hitUrls = [];
+  const pad = n => String(n).padStart(2, '0');
+  const nowKst = new Date(Date.now() + 9 * 3600000);
+  nowKst.setUTCMinutes(0, 0, 0);
+  const mkFcstItems = (resName) => {
+    const items = [];
+    for (let i = 1; i <= 6; i++) {
+      const d = new Date(nowKst.getTime() + i * 3600000);
+      const fcstDate = `${d.getUTCFullYear()}${pad(d.getUTCMonth() + 1)}${pad(d.getUTCDate())}`;
+      const fcstTime = `${pad(d.getUTCHours())}00`;
+      items.push({ fcstDate, fcstTime, category: 'PTY', fcstValue: '0' });
+      items.push({ fcstDate, fcstTime, category: 'POP', fcstValue: '10' });
+      items.push({ fcstDate, fcstTime, category: resName === 'getUltraSrtFcst' ? 'RN1' : 'PCP', fcstValue: '강수없음' });
+      items.push({ fcstDate, fcstTime, category: resName === 'getUltraSrtFcst' ? 'T1H' : 'TMP', fcstValue: '5.0' });
+    }
+    return items;
+  };
+
+  global.fetch = async (input) => {
+    const u = String(input);
+    hitUrls.push(u);
+    if (u.includes('wrn_now_data.php')) {
+      if (wrnFail) throw new Error('The operation was aborted due to timeout');
+      const linePrefix = Buffer.from('L1083300, ', 'ascii');
+      const geochang = Buffer.from([0xB0, 0xC5, 0xC3, 0xA2, 0xB1, 0xBA]); // 거창군
+      const midComma = Buffer.from(', L1083320, ', 'ascii');
+      const geochangSouth = Buffer.from([0xB0, 0xC5, 0xC3, 0xA2, 0xB1, 0xBA, 0xB3, 0xB2, 0xBA, 0xCE]); // 거창군남부
+      const dates = Buffer.from(', 202611181100, 202611182100, ', 'ascii');
+      const hanpa = Buffer.from([0xC7, 0xD1, 0xC6, 0xC4]); // 한파
+      const midComma2 = Buffer.from(', ', 'ascii');
+      const juuibo = Buffer.from([0xC1, 0xD6, 0xC0, 0xC7]); // 주의
+      const balpyo = Buffer.from([0xB9, 0xDF, 0xC7, 0xA5]); // 발표
+      const endLine = Buffer.from(', 20th AM,=\n', 'ascii');
+      return { ok: true, status: 200, arrayBuffer: async () => Buffer.concat([linePrefix, geochang, midComma, geochangSouth, dates, hanpa, midComma2, juuibo, midComma2, balpyo, endLine]) };
+    }
+    if (u.includes('apihub.kma.go.kr/api/typ02/openApi/VilageFcstInfoService_2.0/')) {
+      const parsedU = new URL(u);
+      const nx = parsedU.searchParams.get('nx');
+      // nx=60 (서울) apihub 지연 시뮬레이션 → data.go.kr 403 확인용
+      if (nx === '60') throw new Error('Simulated apihub timeout');
+      const resName = parsedU.pathname.split('/').at(-1);
+      return {
+        ok: true,
+        status: 200,
+        text: async () => JSON.stringify({ response: { header: { resultCode: '00', resultMsg: 'OK' }, body: { items: { item: mkFcstItems(resName) } } } })
+      };
+    }
+    if (u.includes('apis.data.go.kr')) {
+      return { ok: false, status: 403, text: async () => 'Forbidden' };
+    }
+    if (u.includes('road_stn_obs.php')) {
+      return {
+        ok: true,
+        status: 200,
+        arrayBuffer: async () => Buffer.from('#START7777\n 202611182200, 14207, Namsang, Route12, Base, 35.6366, 127.9066, 220, 1, 7.4, 48448, 77.0, 0.0, 0.0, 6.6, 216.1, 1.7, 222.0, 2.3, 1014, -999, -999, -999, -999\n#7777END', 'utf8')
+      };
+    }
+    if (u.includes('road_file_down.php')) {
+      const zipBuf = makeTestZip([
+        { name: 'RWS/PRODUCT/FRG/202611/18/R012_1KM_FRG_202611181425.csv', content: 'LINK_ID,S_NUM,F_LON,F_LAT,T_LON,T_LAT,B_ICE,FLAG,X_GRID,Y_GRID\n1570030500,1,127.90,35.64,127.91,35.65,1,0,350,300', deflate: false }
+      ]);
+      return { ok: true, status: 200, arrayBuffer: async () => zipBuf };
+    }
+    return { ok: false, status: 404, text: async () => 'not found' };
+  };
+
+  try {
+    // 1) 일괄 /api/warnings?places=... 동작 검증
+    const bWrnRes = await worker.fetch(new Request(
+      'https://bionda.pages.dev/api/warnings?places=' + encodeURIComponent('거창군남부|35.644,127.910;함양중부|35.566,127.774')
+    ), env);
+    assert.equal(bWrnRes.status, 200);
+    const bWrn = await bWrnRes.json();
+    assert.equal(bWrn.mode, 'batch');
+    assert.equal(bWrn.stale, false);
+    assert.equal(bWrn.items['35.644,127.910'].warnings[0].title, '한파주의보');
+    assert.equal(bWrn.items['35.566,127.774'].warnings.length, 0);
+
+    // 2) 95초 후 KMA 특보 타임아웃 발생 시 502 대신 stale: true(200)로 직전 특보 유지
+    nowOffset += 95000;
+    wrnFail = true;
+    const staleWrnRes = await worker.fetch(new Request(
+      'https://bionda.pages.dev/api/warnings?places=' + encodeURIComponent('함양중부|35.566,127.774;거창군남부|35.644,127.910')
+    ), env);
+    assert.equal(staleWrnRes.status, 200);
+    const staleWrn = await staleWrnRes.json();
+    assert.equal(staleWrn.stale, true);
+    assert.equal(staleWrn.items['35.644,127.910'].warnings[0].title, '한파주의보');
+
+    // 3) /api/overview-bundle 순서 무관 정규화 캐시 적중
+    const b1Res = await worker.fetch(new Request(
+      'https://bionda.pages.dev/api/overview-bundle?line=14&roadNum=012&places=' +
+      encodeURIComponent('거창군남부|35.6440,127.9100;함양중부|35.5660,127.7740')
+    ), env);
+    assert.equal(b1Res.status, 200);
+    const hitsAfterFirstBundle = hitUrls.length;
+    const b2Res = await worker.fetch(new Request(
+      'https://bionda.pages.dev/api/overview-bundle?line=14&roadNum=012&places=' +
+      encodeURIComponent('함양중부|35.566,127.774;거창군남부|35.644,127.910')
+    ), env);
+    assert.equal(b2Res.status, 200);
+    assert.equal(hitUrls.length, hitsAfterFirstBundle, '정규화 캐시키로 순서 변경 시 재호출 0회');
+
+    // 4) ApiHub 키의 data.go.kr HTTP 403 negative cache (직전 base 폴백 및 후속 격자에서 data.go.kr 스킵)
+    await worker.fetch(new Request('https://bionda.pages.dev/api/forecast?lat=37.5665&lon=126.9780'), env);
+    const dataGoKrCallsFirst = hitUrls.filter(u => u.includes('apis.data.go.kr')).length;
+    assert.ok(dataGoKrCallsFirst >= 1 && dataGoKrCallsFirst <= 3, `동시 3리소스 최초 403 이후 직전 base 폴백은 즉시 skip-host 적용(실제: ${dataGoKrCallsFirst})`);
+    await worker.fetch(new Request('https://bionda.pages.dev/api/forecast?lat=37.5600&lon=126.9800'), env);
+    const dataGoKrCallsSecond = hitUrls.filter(u => u.includes('apis.data.go.kr')).length;
+    assert.equal(dataGoKrCallsSecond, dataGoKrCallsFirst, '동일 ttl 내 후속 요청도 data.go.kr 403 재호출 안 함');
+  } finally {
+    Date.now = realDateNow;
+    global.fetch = beforeFetch;
+  }
+});
+
+test('프런트엔드 fetchBatchWarnings는 1회 일괄 호출 및 실패 시 CAP 3분 쿨다운을 지킨다', async () => {
+  const mod = await import(pathToFileURL(path.join(__dirname, '..', 'public', 'warnings.js')).href);
+  const { fetchBatchWarnings } = mod;
+
+  const beforeFetch = global.fetch;
+  const beforeWindow = global.window;
+  const beforeDomParser = global.DOMParser;
+  const calledPaths = [];
+
+  let backendFail = false;
+  global.window = { location: { hostname: 'bionda.pages.dev', protocol: 'https:' } };
+  global.DOMParser = class {
+    parseFromString() {
+      return {
+        documentElement: { localName: 'rss' },
+        querySelectorAll: () => []
+      };
+    }
+  };
+  global.fetch = async (input) => {
+    const u = String(input);
+    calledPaths.push(u);
+    if (u.includes('/api/health')) {
+      return { ok: true, status: 200, json: async () => ({ status: 'ok' }) };
+    }
+    if (u.includes('/api/warnings?places=')) {
+      if (backendFail) return { ok: false, status: 502, json: async () => ({ error: 'upstream fail' }) };
+      return {
+        ok: true,
+        status: 200,
+        json: async () => ({
+          ok: true,
+          mode: 'batch',
+          stale: false,
+          items: {
+            '35.644,127.910': { name: '거창군남부', warnings: [{ kind: '한파', level: '주의보', title: '한파주의보', regId: 'L1083320', regKo: '거창군남부', tmFc: '202611190600', effectiveText: '11-19 06:00', isFutureEffective: false }] },
+            '35.566,127.774': { name: '함양중부', warnings: [] }
+          }
+        })
+      };
+    }
+    if (u.includes('./api/snapshot.json')) {
+      return {
+        ok: true,
+        status: 200,
+        json: async () => ({
+          warnings: {
+            '35.644,127.910': { warnings: [{ kind: '한파', level: '주의보', title: '한파주의보', regId: 'SNAP', regKo: '거창군남부', tmFc: '202611190500', effectiveText: '11-19 05:00' }] }
+          }
+        })
+      };
+    }
+    if (u.includes('/api/kma-cap')) {
+      return { ok: true, status: 200, text: async () => '<rss></rss>' };
+    }
+    return { ok: false, status: 404, json: async () => ({}) };
+  };
+
+  try {
+    const res = await fetchBatchWarnings([
+      { name: '거창군남부', lat: 35.644, lon: 127.910 },
+      { name: '함양중부', lat: 35.566, lon: 127.774 }
+    ]);
+    assert.equal(res.ok, true);
+    assert.equal(calledPaths.filter(u => u.includes('/api/warnings')).length, 1);
+    assert.equal(res.resultsByKey.get('35.644,127.910').top.title, '한파주의보');
+    assert.equal(res.resultsByKey.get('35.566,127.774').count, 0);
+
+    // 백엔드 502 장애 시: 스냅샷 복원 + 1회 CAP 조회 후 동일 3분 내 재호출은 CAP RSS 스킵
+    backendFail = true;
+    const fail1 = await fetchBatchWarnings([
+      { name: '거창군남부', lat: 35.644, lon: 127.910 },
+      { name: '함양중부', lat: 35.566, lon: 127.774 }
+    ]);
+    assert.equal(fail1.ok, false);
+    assert.equal(fail1.resultsByKey.get('35.644,127.910').top.title, '한파주의보');
+    const capAfterFirstFail = calledPaths.filter(u => u.includes('kma-cap')).length;
+    assert.equal(capAfterFirstFail, 1);
+
+    await fetchBatchWarnings([
+      { name: '거창군남부', lat: 35.644, lon: 127.910 },
+      { name: '함양중부', lat: 35.566, lon: 127.774 }
+    ]);
+    assert.equal(calledPaths.filter(u => u.includes('kma-cap')).length, capAfterFirstFail, '3분 쿨다운 동안 CAP RSS 중복 호출 차단');
+  } finally {
+    global.fetch = beforeFetch;
+    global.window = beforeWindow;
+    global.DOMParser = beforeDomParser;
+  }
+});

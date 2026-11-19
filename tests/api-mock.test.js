@@ -82,6 +82,11 @@ test('도로기상관측 정상 매칭 시 중복 getUltraSrtNcst 호출을 생�
     });
     assert.equal(healthRes.status, 200);
     assert.equal(healthRes.headers.get('access-control-allow-origin'), '*');
+
+    const snapRes = await fetch(`http://127.0.0.1:${port}/api/snapshot.json`);
+    assert.equal(snapRes.status, 200);
+    const snapJson = await snapRes.json();
+    assert.ok(snapJson && typeof snapJson === 'object');
   } finally {
     await new Promise(r => server.close(r));
   }

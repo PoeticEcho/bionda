@@ -1149,7 +1149,8 @@ async function collectShortTerm12({ now = Date.now(), fetchShort, fetchUltra }) 
   }
   const gridEntries = [...uniqueGrids.entries()];
   const gridData = new Map();
-  const chunkSize = 6;
+  // Cloudflare Workers 동시 아웃바운드 6연결 한도를 넘겨 대기 중 타임아웃이 연쇄 발생하지 않도록 격자 3개(=최대 6요청)씩 분할
+  const chunkSize = 3;
   for (let idx = 0; idx < gridEntries.length; idx += chunkSize) {
     const batch = gridEntries.slice(idx, idx + chunkSize);
     const settled = await Promise.allSettled(
@@ -1251,6 +1252,14 @@ function parseOverviewPlacesParam(rawPlaces = '') {
   return out;
 }
 
+function canonicalOverviewPlacesKey(places = []) {
+  return [...(places || [])]
+    .filter(p => p && p.key)
+    .sort((a, b) => String(a.key).localeCompare(String(b.key)))
+    .map(p => `${p.name || p.key}|${p.key}`)
+    .join(';');
+}
+
 
 /**
  * 비온다? × 날씨봇 — Cloudflare Workers 무료 티어(24시간 무슬립·일 10만 요청) API 프록시
@@ -1325,6 +1334,11 @@ function jsonResponse(request, env, status, payload, extraHeaders = {}) {
 function edgeCacheRequest(urlObj, stripT = false) {
   const u = new URL('https://bionda-edge-cache.internal' + urlObj.pathname + urlObj.search);
   if (stripT) u.searchParams.delete('t');
+  if ((urlObj.pathname === '/api/overview-bundle' || urlObj.pathname === '/api/warnings') && u.searchParams.has('places')) {
+    const rawPlaces = u.searchParams.get('places') || '';
+    const canon = canonicalOverviewPlacesKey(parseOverviewPlacesParam(rawPlaces));
+    if (canon) u.searchParams.set('places', canon);
+  }
   return new Request(u.toString(), { method: 'GET' });
 }
 
@@ -1376,7 +1390,11 @@ async function fetchKmaFromBase(baseUrl, resource, grid, base, rawKey, timeout =
   u.searchParams.set('nx', String(grid.nx));
   u.searchParams.set('ny', String(grid.ny));
   const r = await fetchWithTimeout(u.toString(), { headers: { Accept: 'application/json' } }, timeout);
-  if (!r.ok) throw new Error(`기상청 응답 오류 HTTP ${r.status}`);
+  if (!r.ok) {
+    const err = new Error(`기상청 응답 오류 HTTP ${r.status}`);
+    err.status = r.status;
+    throw err;
+  }
   return parseKmaForecastJson(await r.text());
 }
 
@@ -1384,25 +1402,38 @@ async function fetchKma(env, resource, grid, base, timeout = 5000, bypassCache =
   const apiKey = getServiceKey(env);
   if (!apiKey) throw new Error('KMA_SERVICE_KEY 미설정');
   const cacheKey = `kma|${resource}|${grid.nx}|${grid.ny}|${datePart(base)}|${timePart(base)}`;
+  const staleKey = `kma-stale|${resource}|${grid.nx}|${grid.ny}`;
   const hit = !bypassCache ? getCached(cacheKey) : null;
   if (hit) return hit;
 
   return withInFlight(bypassCache ? `${cacheKey}|bypass` : cacheKey, async () => {
     const isApiHubKey = /^[A-Za-z0-9_-]{20,26}$/.test(apiKey.trim()) && !apiKey.includes('dummy');
+    const skipDataGoKr = isApiHubKey && Boolean(getCached('skip-host|data.go.kr'));
     const bases = isApiHubKey
-      ? [APIHUB_FCST_BASE, DATA_GO_KR_BASE]
+      ? (skipDataGoKr ? [APIHUB_FCST_BASE] : [APIHUB_FCST_BASE, DATA_GO_KR_BASE])
       : [DATA_GO_KR_BASE, APIHUB_FCST_BASE];
 
     let lastErr;
-    for (const baseUrl of bases) {
+    for (let i = 0; i < bases.length; i++) {
+      const baseUrl = bases[i];
+      if (isApiHubKey && baseUrl.includes('data.go.kr') && getCached('skip-host|data.go.kr')) {
+        continue;
+      }
+      const attemptTimeout = i > 0 ? Math.min(timeout, 3500) : timeout;
       try {
-        const items = await fetchKmaFromBase(baseUrl, resource, grid, base, apiKey, timeout);
+        const items = await fetchKmaFromBase(baseUrl, resource, grid, base, apiKey, attemptTimeout);
         const ttlMs = resource === 'getVilageFcst' ? 45 * 60000 : 5 * 60000;
+        const staleTtlMs = resource === 'getVilageFcst' ? 6 * 3600000 : 90 * 60000;
         setCached(cacheKey, items, ttlMs);
+        setCached(staleKey, { items, base: isoKst(base) }, staleTtlMs);
         return items;
       } catch (e) {
         lastErr = e;
-        console.warn('[fetchKma]', resource, baseUrl.includes('apihub') ? 'apihub' : 'data.go.kr', grid.nx, grid.ny, errMessage(e));
+        const hostTag = baseUrl.includes('apihub') ? 'apihub' : 'data.go.kr';
+        if (isApiHubKey && hostTag === 'data.go.kr' && (e?.status === 401 || e?.status === 403 || /HTTP 40[13]/.test(errMessage(e)))) {
+          setCached('skip-host|data.go.kr', true, 60 * 60000);
+        }
+        console.warn('[fetchKma]', resource, hostTag, grid.nx, grid.ny, errMessage(e));
       }
     }
     throw lastErr;
@@ -1421,6 +1452,15 @@ async function fetchWithFallback(env, resource, grid, base, prevMinutes, bypassC
         notice: '최신 발표분을 가져오지 못해 직전 발표분 사용'
       };
     } catch {
+      const stale = getCached(`kma-stale|${resource}|${grid.nx}|${grid.ny}`);
+      if (stale?.items?.length) {
+        return {
+          items: stale.items,
+          base: stale.base,
+          notice: '기상청 일시 지연으로 직전 수신 자료 사용',
+          stale: true
+        };
+      }
       throw error;
     }
   }
@@ -1498,7 +1538,7 @@ async function fetchRoadStations(env, line = getRoadLineCode(env), bypassCache =
 
   return withInFlight(bypassCache ? `${cacheKey}|bypass` : cacheKey, async () => {
     const now = Date.now();
-    const offsetsMinutes = [2, 5, 9];
+    const offsetsMinutes = [2, 6];
     let lastStations = [];
     for (const off of offsetsMinutes) {
       try {
@@ -1511,7 +1551,7 @@ async function fetchRoadStations(env, line = getRoadLineCode(env), bypassCache =
         u.searchParams.set('disp', '1');
         u.searchParams.set('help', '2');
         u.searchParams.set('authKey', deEncodedKey(key));
-        const r = await fetchWithTimeout(u.toString(), {}, 5000);
+        const r = await fetchWithTimeout(u.toString(), {}, 4000);
         if (!r.ok) {
           console.warn('[fetchRoadStations] HTTP', r.status, tm1);
           continue;
@@ -1554,7 +1594,7 @@ async function fetchRoadRisk(env, roadNum = '012') {
 
   return withInFlight(cacheKey, async () => {
     const now = Date.now();
-    const offsetsMinutes = [5, 10, 15, 20];
+    const offsetsMinutes = [5, 10, 15];
     for (const off of offsetsMinutes) {
       try {
         const { tmUtc, tmKst } = utcFiveMinSlot(now - off * 60000);
@@ -1562,7 +1602,7 @@ async function fetchRoadRisk(env, roadNum = '012') {
         u.searchParams.set('tm', tmUtc);
         u.searchParams.set('roadNum', cleanNum);
         u.searchParams.set('authKey', deEncodedKey(key));
-        const r = await fetchWithTimeout(u.toString(), {}, 4500);
+        const r = await fetchWithTimeout(u.toString(), {}, 4000);
         if (!r.ok) continue;
         const bytes = new Uint8Array(await r.arrayBuffer());
         if (bytes.length < 22 || bytes[0] !== 0x50 || bytes[1] !== 0x4b) continue;
@@ -1625,7 +1665,7 @@ async function fetchOverviewBundle(env, { placesParam = '', line = getRoadLineCo
   const sBase = baseShort(now);
   const uBase = baseUltra(now);
   const oBase = baseObservation(now);
-  const bundleKey = `bundle|${line}|${roadNum}|${places.map(p => p.key).join('|')}|${timePart(uBase)}|${timePart(sBase)}`;
+  const bundleKey = `bundle|${line}|${roadNum}|${canonicalOverviewPlacesKey(places)}|${timePart(uBase)}|${timePart(sBase)}`;
   const hit = !force ? getCached(bundleKey) : null;
   if (hit) return hit;
 
@@ -1637,14 +1677,14 @@ async function fetchOverviewBundle(env, { placesParam = '', line = getRoadLineCo
     }
     const gridEntries = [...uniqueGrids.entries()];
 
-    // 1) 도로관측 · 012위험 · 특보 · 격자별 단기/초단기예보를 처음부터 완전 병렬 시작 (기존 직렬 대기 제거)
+    // 1) 도로관측 · 012위험 · 특보 · 첫 번째 격자(ultra probe) 병렬 시작 후 나머지 격자는 2개씩 분할 (Cloudflare 6연결 한도 내 타임아웃 방지)
     const roadPromise = getRoadKey(env) ? fetchRoadStations(env, line, force).catch(() => null) : Promise.resolve(null);
     const riskPromise = getRoadKey(env) ? fetchRoadRisk(env, roadNum).catch(() => null) : Promise.resolve(null);
     const wrnPromise = fetchWrnNowList(env).catch(() => []);
 
     const gridResults = new Map();
     let forecastPromise = Promise.resolve();
-    if (getServiceKey(env)) {
+    if (getServiceKey(env) && gridEntries.length) {
       let resolvedUBase = null;
       let ultraProbePromise = null;
       const fetchBundleUltra = async (grid) => {
@@ -1677,7 +1717,7 @@ async function fetchOverviewBundle(env, { placesParam = '', line = getRoadLineCo
         return { roadData, placeRoadMatches, gridNeedsNcst };
       });
 
-      forecastPromise = Promise.allSettled(gridEntries.map(async ([gk, grid]) => {
+      const runGrid = async ([gk, grid]) => {
         const ncstPromise = roadMatchGate.then(({ gridNeedsNcst }) =>
           gridNeedsNcst.has(gk) ? fetchWithFallback(env, 'getUltraSrtNcst', grid, oBase, 60) : null
         );
@@ -1687,7 +1727,15 @@ async function fetchOverviewBundle(env, { placesParam = '', line = getRoadLineCo
           ncstPromise
         ]);
         gridResults.set(gk, requests);
-      }));
+      };
+
+      forecastPromise = (async () => {
+        await runGrid(gridEntries[0]);
+        const rest = gridEntries.slice(1);
+        for (let idx = 0; idx < rest.length; idx += 2) {
+          await Promise.allSettled(rest.slice(idx, idx + 2).map(runGrid));
+        }
+      })();
     }
 
     const [roadData, roadRisk, allWarnings] = await Promise.all([roadPromise, riskPromise, wrnPromise, forecastPromise]);
@@ -1747,22 +1795,36 @@ async function fetchWrnNowList(env) {
   const key = getServiceKey(env);
   if (!key) return [];
   const cacheKey = 'kma-wrn-now';
+  const staleKey = 'kma-wrn-now-last-good';
   const hit = getCached(cacheKey);
   if (hit) return hit;
   return withInFlight(cacheKey, async () => {
-    const u = new URL('https://apihub.kma.go.kr/api/typ01/url/wrn_now_data.php');
-    u.searchParams.set('fe', 'f');
-    u.searchParams.set('tm', '');
-    u.searchParams.set('disp', '0');
-    u.searchParams.set('help', '2');
-    u.searchParams.set('authKey', deEncodedKey(key));
-    const r = await fetchWithTimeout(u.toString(), {}, 9000);
-    if (!r.ok) return [];
-    const bytes = new Uint8Array(await r.arrayBuffer());
-    const text = new TextDecoder('euc-kr').decode(bytes);
-    const parsed = parseWrnNow(text);
-    setCached(cacheKey, parsed, 60000);
-    return parsed;
+    try {
+      const u = new URL('https://apihub.kma.go.kr/api/typ01/url/wrn_now_data.php');
+      u.searchParams.set('fe', 'f');
+      u.searchParams.set('tm', '');
+      u.searchParams.set('disp', '0');
+      u.searchParams.set('help', '2');
+      u.searchParams.set('authKey', deEncodedKey(key));
+      const r = await fetchWithTimeout(u.toString(), {}, 6500);
+      if (!r.ok) throw new Error(`KMA 특보 응답 오류 HTTP ${r.status}`);
+      const bytes = new Uint8Array(await r.arrayBuffer());
+      const text = new TextDecoder('euc-kr').decode(bytes);
+      const parsed = parseWrnNow(text);
+      setCached(cacheKey, parsed, 90000);
+      setCached(staleKey, parsed, 20 * 60000);
+      return parsed;
+    } catch (e) {
+      console.warn('[fetchWrnNowList]', errMessage(e));
+      const stale = getCached(staleKey);
+      if (stale) {
+        const out = [...stale];
+        Object.defineProperty(out, '_stale', { value: true, enumerable: false });
+        setCached(cacheKey, out, 45000);
+        return out;
+      }
+      throw e;
+    }
   });
 }
 
@@ -2017,15 +2079,42 @@ export default {
     }
 
     if (pathname === '/api/warnings') {
+      const placesParam = (requestUrl.searchParams.get('places') || '').trim();
       const name = (requestUrl.searchParams.get('name') || '').trim();
       const latRaw = requestUrl.searchParams.get('lat');
       const lonRaw = requestUrl.searchParams.get('lon');
       const lat = latRaw !== null ? Number(latRaw) : NaN;
       const lon = lonRaw !== null ? Number(lonRaw) : NaN;
       try {
+        const parsedPlaces = placesParam ? parseOverviewPlacesParam(placesParam) : null;
+        if (placesParam && (!parsedPlaces || !parsedPlaces.length)) {
+          return jsonResponse(request, env, 400, { error: '조회할 유효한 국내 좌표가 없습니다.' });
+        }
         const all = await fetchWrnNowList(env);
+        const isStale = Boolean(all._stale);
         const hasSubZones = all.some(w => w.regUpKo && w.regKo !== w.regUpKo);
-        const capPolyMap = name && hasSubZones ? await getCapPolygonMap() : new Map();
+        const capPolyMap = (parsedPlaces || name) && hasSubZones ? await getCapPolygonMap() : new Map();
+        const cacheCtrl = isStale ? 'public, max-age=30, s-maxage=30' : 'public, max-age=55, s-maxage=90';
+
+        if (parsedPlaces) {
+          const items = {};
+          for (const p of parsedPlaces) {
+            items[p.key] = {
+              name: p.name,
+              warnings: sortWarnings(all.filter(w => warningMatchesPlace(w, p.name, p.lat, p.lon, capPolyMap)))
+            };
+          }
+          const res = jsonResponse(
+            request,
+            env,
+            200,
+            { ok: true, mode: 'batch', updatedAt: new Date().toISOString(), stale: isStale, items, totalNational: all.length },
+            { 'Cache-Control': cacheCtrl }
+          );
+          if (!isStale) putEdgeCache(ctx, cacheKeyReq, res);
+          return res;
+        }
+
         const matched = name
           ? all.filter(w => warningMatchesPlace(w, name, lat, lon, capPolyMap))
           : all;
@@ -2033,10 +2122,10 @@ export default {
           request,
           env,
           200,
-          { ok: true, updatedAt: new Date().toISOString(), warnings: sortWarnings(matched), totalNational: all.length },
-          { 'Cache-Control': 'public, max-age=55, s-maxage=55' }
+          { ok: true, updatedAt: new Date().toISOString(), stale: isStale, warnings: sortWarnings(matched), totalNational: all.length },
+          { 'Cache-Control': cacheCtrl }
         );
-        putEdgeCache(ctx, cacheKeyReq, res);
+        if (!isStale) putEdgeCache(ctx, cacheKeyReq, res);
         return res;
       } catch (e) {
         return jsonResponse(request, env, 502, { error: errMessage(e) });
