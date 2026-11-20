@@ -40,6 +40,7 @@ test('ready points to the version of the PNG recorded by its publisher', async (
   const body = await response.json();
   assert.equal(response.status, 200);
   assert.equal(response.headers.get('Cache-Control'), 'no-store');
+  assert.equal(response.headers.get('Access-Control-Allow-Origin'), '*');
   assert.equal(body.status, 'ready');
   assert.equal(body.image_url, 'https://bionda.pages.dev/share/morning.png?v=' + hash);
   assert.equal(body.sha256, hash);

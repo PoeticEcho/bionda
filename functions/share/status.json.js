@@ -8,3 +8,8 @@ export async function onRequestGet({ request, env }) {
     return asset.json();
   });
 }
+
+export async function onRequestHead(context) {
+  const result = await onRequestGet(context);
+  return new Response(null, { status: result.status, headers: result.headers });
+}
