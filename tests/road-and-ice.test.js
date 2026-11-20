@@ -438,22 +438,25 @@ test('무안광주대구선(012) 위험수준 격상 판정(0→2, 0→3, 1→2,
   }
 });
 
-test('12개 읍·면·동 1시간 단기예보(SHORT_TERM_12_REGIONS), 강수·영하·동시겹침 요약 및 내장 KMA 아이콘을 검증한다', async () => {
+test('13개 읍·면·동 1시간 단기예보(SHORT_TERM_12_REGIONS), 강수·영하·동시겹침 요약 및 내장 KMA 아이콘을 검증한다', async () => {
   const core = require('../lib/bionda-core');
   const { getKmaIconInfo, renderKmaIconSvg, renderWindArrowSvg } = await import('../public/kma-icons.js');
 
-  assert.equal(core.SHORT_TERM_12_REGIONS.length, 12);
+  assert.equal(core.SHORT_TERM_12_REGIONS.length, 13);
   assert.ok(core.SHORT_TERM_12_REGIONS.some(r => r.county === '고령군' && r.name === '대가야읍'));
-  assert.equal(new Set(core.SHORT_TERM_12_REGIONS.map(r => `${r.grid.nx},${r.grid.ny}`)).size, 11);
+  assert.equal(new Set(core.SHORT_TERM_12_REGIONS.map(r => `${r.grid.nx},${r.grid.ny}`)).size, 12);
   const byId = Object.fromEntries(core.SHORT_TERM_12_REGIONS.map(r => [r.id, r]));
+  assert.deepEqual(byId.gaya.grid, { nx: 81, ny: 88 });
+  assert.deepEqual(byId.yaro.grid, { nx: 81, ny: 87 });
+  assert.equal(byId.gaya.county, '합천군');
   assert.deepEqual(byId.jigok.grid, { nx: 74, ny: 83 });
   assert.deepEqual(byId.sudong.grid, { nx: 75, ny: 82 });
   assert.deepEqual(byId.namha.grid, { nx: 77, ny: 86 });
   assert.deepEqual(byId.geochang.grid, { nx: 77, ny: 86 });
   assert.deepEqual(byId.okpo.grid, { nx: 87, ny: 89 });
-  assert.deepEqual(core.SHORT_TERM_12_REGIONS.map(r => r.routeOrder).sort((a, b) => a - b), [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12]);
+  assert.deepEqual(core.SHORT_TERM_12_REGIONS.map(r => r.routeOrder).sort((a, b) => a - b), [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13]);
 
-  // 고유 격자(11개) 중복 제거 호출 및 초단기(+1h~+6h) 시작 시각 정렬 검증
+  // 고유 격자(12개) 중복 제거 호출 및 초단기(+1h~+6h) 시작 시각 정렬 검증
   let shortCalls = 0;
   let ultraCalls = 0;
   const fixedNow = Date.parse('2026-11-19T04:40:00+09:00');
@@ -484,9 +487,9 @@ test('12개 읍·면·동 1시간 단기예보(SHORT_TERM_12_REGIONS), 강수·�
       };
     }
   });
-  assert.equal(shortCalls, 11);
-  assert.equal(ultraCalls, 11);
-  assert.equal(samplePayload.uniqueGridCount, 11);
+  assert.equal(shortCalls, 12);
+  assert.equal(ultraCalls, 12);
+  assert.equal(samplePayload.uniqueGridCount, 12);
   const jigokOut = samplePayload.regions.find(r => r.id === 'jigok');
   assert.equal(jigokOut.hours[0].hourKst, 5);
   assert.equal(jigokOut.hours[0].temp, 4);

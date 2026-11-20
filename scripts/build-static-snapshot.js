@@ -45,7 +45,7 @@ async function main() {
     }
     await fs.writeFile(path.join(outDir, 'short-term-12.json'), s12Str, 'utf8');
     const k12 = short12.windowKPIs?.h12 || {};
-    console.log(`[검증완료] 12개 지역 1시간 단기예보 저장 완료 (${short12.regions?.length}곳, 12h 강수=${k12.wetRegions ?? 0}곳, 영하=${k12.freezingRegions ?? 0}곳, 겹침=${k12.overlapRegions ?? 0}곳)`);
+    console.log(`[검증완료] 1시간 단기예보 저장 완료 (${short12.regions?.length}곳, 12h 강수=${k12.wetRegions ?? 0}곳, 영하=${k12.freezingRegions ?? 0}곳, 겹침=${k12.overlapRegions ?? 0}곳)`);
   }
 
   const observations = {};

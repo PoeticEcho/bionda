@@ -206,14 +206,14 @@ test('Cloudflare Worker는 CORS·OPTIONS·health·도로관측(중복 Ncst 생�
     assert.equal(fcst.hours.length, 12);
     assert.ok(!JSON.stringify(fcst).includes('worker-secret-test-key'));
 
-    // Short-term 12-area single API call
+    // Short-term regional single API call
     const s12Res = await worker.fetch(new Request('https://bionda-api.workers.dev/api/short-term-12'), env);
     assert.equal(s12Res.status, 200);
     const s12 = await s12Res.json();
     assert.equal(s12.ok, true);
-    assert.equal(s12.regions.length, 12);
-    assert.equal(s12.uniqueGridCount, 11);
-    assert.equal(s12.windowKPIs.h12.wetRegions, 12);
+    assert.equal(s12.regions.length, 13);
+    assert.equal(s12.uniqueGridCount, 12);
+    assert.equal(s12.windowKPIs.h12.wetRegions, 13);
     assert.ok(s12.windowKPIs.h12.freezingRegions >= 1);
     assert.ok(s12.windowKPIs.h12.overlapRegions >= 1);
     assert.ok(!JSON.stringify(s12).includes('worker-secret-test-key'));
@@ -227,7 +227,7 @@ test('Cloudflare Worker는 CORS·OPTIONS·health·도로관측(중복 Ncst 생�
     const vilageAfter = hitUrls.filter(u => u.includes('getVilageFcst')).length;
     const ultraAfter = hitUrls.filter(u => u.includes('getUltraSrtFcst')).length;
     assert.equal(vilageAfter, vilageBefore, 'refreshShort=0 시 단기예보 격자 캐시 유지');
-    assert.ok(ultraAfter >= ultraBefore + 11, 'refreshUltra=1 시 11격자 초단기예보 강제 재조회');
+    assert.ok(ultraAfter >= ultraBefore + 12, 'refreshUltra=1 시 12격자 초단기예보 강제 재조회');
 
     // Warnings (EUC-KR decoding verification!)
     const wrnRes = await worker.fetch(new Request('https://bionda-api.workers.dev/api/warnings?name=' + encodeURIComponent('거창군남부') + '&lat=35.644&lon=127.910'), env);
