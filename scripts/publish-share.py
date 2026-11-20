@@ -7,6 +7,7 @@ from functools import partial
 from http.server import SimpleHTTPRequestHandler, ThreadingHTTPServer
 from io import BytesIO
 import json
+import os
 from pathlib import Path
 import shutil
 import subprocess
@@ -25,14 +26,18 @@ KST = timezone(timedelta(hours=9))
 ORIGIN = "https://bionda.pages.dev"
 
 
-def load_api(path, params):
-    url = ORIGIN + path + "?" + urlencode(params)
+def open_public(url, accept):
     request = Request(url, headers={
-        "Accept": "application/json",
+        "Accept": accept,
         "User-Agent": "Bionda-Briefing/1.0 (+https://bionda.pages.dev/llms.txt)",
     })
+    return urlopen(request, timeout=60)
+
+
+def load_api(path, params):
+    url = ORIGIN + path + "?" + urlencode(params)
     try:
-        with urlopen(request, timeout=60) as response:
+        with open_public(url, "application/json") as response:
             data = json.load(response)
     except HTTPError as err:
         if 400 <= err.code < 500 and err.code not in (408, 429):
@@ -43,9 +48,13 @@ def load_api(path, params):
     return data
 
 
+def edition_day(now, slot):
+    return now.date() - timedelta(days=int(slot == "night" and now.hour < 8))
+
+
 def live_data(slot, now, places):
     # The 08:00 edition uses the 08:00 KMA release, the 18:00 edition the 17:00 release.
-    day = now.date() - timedelta(days=int(slot == "night" and now.hour < 8))
+    day = edition_day(now, slot)
     base_hour = 8 if slot == "morning" else 17
     expected = datetime.combine(day, datetime.min.time(), KST).replace(hour=base_hour)
     # baseShort() begins requesting a KMA release 20 minutes after its issue time.
@@ -126,14 +135,72 @@ def render(data):
     raise ValueError("Compressed report exceeds 200 KiB")
 
 
+def receipt_matches(output, edition_id):
+    try:
+        receipt = json.loads(output.with_suffix(".json").read_text())
+        image = output.read_bytes()
+        return (receipt.get("edition_id") == edition_id and receipt.get("bytes") == len(image)
+                and receipt.get("sha256") == hashlib.sha256(image).hexdigest())
+    except (FileNotFoundError, ValueError):
+        return False
+
+
+def verify_published(edition_id):
+    slot = edition_id.rsplit("-", 1)[1]
+    receipt = json.loads((PUBLIC / "share" / (slot + ".json")).read_text())
+    image_url = f"{ORIGIN}/share/{slot}.png?v={receipt['sha256']}"
+    for attempt in range(6):
+        try:
+            with open_public(ORIGIN + "/share/status.json", "application/json") as response:
+                if response.headers.get_content_type() != "application/json":
+                    raise ValueError("Public status endpoint did not return JSON")
+                status = json.load(response)
+            if status.get("edition_id") == edition_id:
+                if status.get("status") != "ready" or status.get("image_url") != image_url:
+                    raise ValueError(f"{edition_id} is not yet available at the public status endpoint")
+            else:
+                # A later slot can begin while the previous edition is deploying.
+                now = datetime.now(KST)
+                current = "morning" if 8 <= now.hour < 18 else "night"
+                current_id = f"{edition_day(now, current).isoformat()}-{current}"
+                if status.get("edition_id") != current_id or status.get("status") not in ("ready", "pending"):
+                    raise ValueError("Public status does not identify the current edition")
+            with open_public(image_url, "image/png") as response:
+                image = response.read(200 * 1024 + 1)
+            if hashlib.sha256(image).hexdigest() != receipt["sha256"]:
+                raise ValueError("The public PNG hash differs from the published file")
+            with open_public(ORIGIN + "/llms.txt", "text/plain") as response:
+                if (ORIGIN + "/share/status.json").encode() not in response.read():
+                    raise ValueError("The public llms.txt does not point to the status endpoint")
+            print(f"Verified public guide, status and PNG: {edition_id}, {len(image):,} bytes")
+            return
+        except (ValueError, OSError) as err:
+            print(f"Publication check {attempt + 1}: {err}", flush=True)
+            if attempt == 5:
+                raise
+            time.sleep(60)
+
+
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--slot", choices=("morning", "night"))
     parser.add_argument("--bootstrap", action="store_true")
+    parser.add_argument("--verify-edition", help="Check the edition at the public bot URLs after deployment")
     args = parser.parse_args()
+    if args.verify_edition:
+        verify_published(args.verify_edition)
+        raise SystemExit(0)
     now = datetime.now(KST)
     slot = args.slot or ("morning" if 8 <= now.hour < 18 else "night")
-    day = now.date() - timedelta(days=int(slot == "night" and now.hour < 8))
+    day = edition_day(now, slot)
+    edition_id = f"{day.isoformat()}-{slot}"
+    output = PUBLIC / "share" / (slot + ".png")
+    if os.environ.get("GITHUB_OUTPUT"):
+        with open(os.environ["GITHUB_OUTPUT"], "a", encoding="utf-8") as step_output:
+            print(f"edition_id={edition_id}", file=step_output)
+    if not args.bootstrap and receipt_matches(output, edition_id):
+        print(f"{edition_id} has already been published")
+        raise SystemExit(0)
     try:
         png = render(prepare(slot, args.bootstrap, now))
     except Exception as err:
@@ -141,13 +208,12 @@ if __name__ == "__main__":
         message = str(err).splitlines()[0].replace("%", "%25") if str(err) else type(err).__name__
         print(f"::error title=Cannot generate {slot} briefing::{message}", flush=True)
         raise
-    output = PUBLIC / "share" / (slot + ".png")
     output.parent.mkdir(exist_ok=True)
     temporary = output.with_suffix(".tmp")
     temporary.write_bytes(png)
     temporary.replace(output)
     metadata = {"edition_id": None} if args.bootstrap else {
-        "edition_id": f"{day.isoformat()}-{slot}",
+        "edition_id": edition_id,
         "generated_at": datetime.now(KST).isoformat(timespec="seconds"),
         "bytes": len(png), "sha256": hashlib.sha256(png).hexdigest(),
     }
