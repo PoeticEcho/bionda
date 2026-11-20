@@ -1,3 +1,5 @@
+import { getServiceKey } from '../../lib/bionda-core.js';
+import { completeBoundHourlyResponse } from '../../lib/hourly-roster.mjs';
 import worker from '../../cloudflare/worker.js';
 
 /**
@@ -16,7 +18,15 @@ export async function onRequest(context) {
     } catch {}
   }
   if (context.env?.API_WORKER && typeof context.env.API_WORKER.fetch === 'function') {
-    return context.env.API_WORKER.fetch(context.request);
+    const service = context.env.API_WORKER;
+    if (method === 'GET' && new URL(context.request.url).pathname === '/api/short-term-12') {
+      if (getServiceKey(context.env)) {
+        const local = await worker.fetch(context.request, context.env, { waitUntil: p => context.waitUntil(p) });
+        if (local.ok) return completeBoundHourlyResponse(local, context.request, service);
+      }
+      return completeBoundHourlyResponse(await service.fetch(context.request), context.request, service);
+    }
+    return service.fetch(context.request);
   }
   return worker.fetch(context.request, context.env, {
     waitUntil: p => context.waitUntil(p)

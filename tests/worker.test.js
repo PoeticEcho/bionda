@@ -538,3 +538,47 @@ test('프런트엔드 fetchBatchWarnings는 1회 일괄 호출 및 실패 시 CA
     global.DOMParser = beforeDomParser;
   }
 });
+
+test('Pages compares Gaya and Yaro when the bound Worker still returns 11 grids', async () => {
+  const { onRequest } = await import('../functions/api/[[path]].js');
+  const snapshot = require('../public/api/short-term-12.json');
+  const yaro = snapshot.regions.find(r => r.id === 'yaro');
+  const legacy = { ...snapshot, uniqueGridCount: 11, regions: snapshot.regions.filter(r => r.id !== 'gaya') };
+  const calls = [];
+  let batch = legacy;
+  let point = {
+    ok: true, grid: { nx: 81, ny: 88 }, sources: yaro.sources,
+    hours: [{ time: yaro.hours[0].time, temp: '-11', chance: 80, wet: true, rainMm: 1 }]
+  };
+  const ctx = {
+    request: new Request('https://bionda.pages.dev/api/short-term-12?force=1'),
+    env: { API_WORKER: { fetch: async req => {
+      const url = new URL(req.url);
+      calls.push(url);
+      return Response.json(url.pathname === '/api/forecast' ? point : batch);
+    } } }
+  };
+  const merged = await (await onRequest(ctx)).json();
+  assert.equal(calls.length, 2);
+  assert.equal(calls[1].pathname, '/api/forecast');
+  assert.equal(calls[1].searchParams.get('lat'), '35.762683');
+  assert.equal(calls[1].searchParams.get('lon'), '128.139463');
+  assert.equal(calls[1].searchParams.get('force'), '1');
+  assert.equal(merged.regions.length, 13);
+  assert.equal(merged.uniqueGridCount, 12);
+  const gaya = merged.regions.find(r => r.id === 'gaya');
+  assert.equal(gaya.hours[0].temp, -11);
+  assert.equal(gaya.hours[0].pop, 80);
+  assert.equal(gaya.hours[0].hourKst, yaro.hours[0].hourKst);
+  assert.equal(gaya.summaries.h12.overlapHours, 1);
+  assert.deepEqual(merged.regions.find(r => r.id === 'yaro').hours, yaro.hours);
+
+  point = { ...point, grid: yaro.grid };
+  const delayed = await (await onRequest(ctx)).json();
+  assert.deepEqual(delayed.regions.find(r => r.id === 'gaya').hours, []);
+
+  calls.length = 0;
+  batch = merged;
+  assert.deepEqual(await (await onRequest(ctx)).json(), merged);
+  assert.equal(calls.length, 1);
+});
