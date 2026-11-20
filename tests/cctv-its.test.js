@@ -155,3 +155,68 @@ test('Cloudflare Worker /api/cctv는 키 미설정 500, MISS→HIT 15분 캐시,
     __resetWorkerCaches();
   }
 });
+
+test('configured ITS source recovers from a failed custom mirror', async () => {
+  let calls = 0;
+  const payload = await buildCctvPayload({ CCTV_SOURCE_URL: 'https://example.org/mirror', ITS_API_KEY: 'test' }, async input => {
+    calls++;
+    if (new URL(input).hostname === 'example.org') return new Response(null, { status: 502 });
+    assert.equal(new URL(input).hostname, 'openapi.its.go.kr');
+    return Response.json({ response: { data: [{ cctvname: '야로대교1', cctvurl: 'https://example.org/live.m3u8' }] } });
+  });
+  assert.equal(calls, 2);
+  assert.equal(payload.count, 1);
+  assert.equal(payload.sites.find(s => s.id === 'hapcheon-seobuk').nearest.items.length, 1);
+});
+
+test('Pages serves the recent directory during a 502 and rejects expired or rate-limited fallback', async t => {
+  const { onRequest } = await import('../functions/api/[[path]].js');
+  const stored = new Map();
+  const pending = [];
+  t.mock.method(Date, 'now', () => now);
+  let now = Date.parse('2026-11-20T18:00:00Z');
+  const live = { ok: true, cctvs: [{ name: '야로대교1', url: 'https://example.org/live.m3u8' }],
+    fetchedAt: new Date(now).toISOString() };
+  let code = 200;
+  const original = globalThis.caches;
+  globalThis.caches = { default: {
+    put: (key, res) => stored.set(key.url, res),
+    match: async key => stored.get(key.url)?.clone(),
+  } };
+  t.after(() => { if (original) globalThis.caches = original; else delete globalThis.caches; });
+  const ctx = {
+    request: new Request('https://bionda.pages.dev/api/cctv'),
+    env: { API_WORKER: { fetch: async () => Response.json(code === 200 ? live : {}, { status: code }) } },
+    waitUntil: p => pending.push(p),
+  };
+  assert.equal((await onRequest(ctx)).status, 200);
+  await Promise.all(pending);
+  code = 502;
+  ctx.request = new Request('https://bionda.pages.dev/api/cctv?refresh=1');
+  const result = await onRequest(ctx);
+  assert.equal(result.headers.get('X-Cache'), 'STALE');
+  assert.equal((await result.json()).fetchedAt, live.fetchedAt);
+  code = 429;
+  assert.equal((await onRequest(ctx)).status, 429);
+  code = 502;
+  now += 30 * 60 * 1000;
+  assert.equal((await onRequest(ctx)).status, 502);
+});
+
+test('Pages retries a failed binding using its configured CCTV source on the first visit', async t => {
+  const { onRequest } = await import('../functions/api/[[path]].js');
+  const { __resetWorkerCaches } = await import('../cloudflare/worker.js');
+  __resetWorkerCaches();
+  t.after(__resetWorkerCaches);
+  t.mock.method(globalThis, 'fetch', async url => {
+    assert.equal(String(url), 'https://example.org/its.json');
+    return Response.json([{ cctvname: '야로대교1', cctvurl: 'https://example.org/live.m3u8' }]);
+  });
+  const res = await onRequest({
+    request: new Request('https://bionda.pages.dev/api/cctv'),
+    env: { CCTV_SOURCE_URL: 'https://example.org/its.json',
+      API_WORKER: { fetch: async () => new Response(null, { status: 502 }) } },
+  });
+  assert.equal(res.status, 200);
+  assert.equal((await res.json()).cctvs[0].name, '야로대교1');
+});

@@ -83,7 +83,7 @@ function allow(ip) {
   return hit.n <= 240;
 }
 
-function buildCorsHeaders(request, env = {}) {
+export function buildCorsHeaders(request, env = {}) {
   const headers = new Headers();
   const allowList = String(env.CORS_ORIGINS || '')
     .split(',')

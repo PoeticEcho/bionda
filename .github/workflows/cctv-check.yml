@@ -7,6 +7,7 @@ on:
       - '.github/workflows/cctv-check.yml'
       - 'functions/api/**'
       - 'lib/cctv-its.js'
+      - 'lib/cctv-pages.mjs'
       - 'cloudflare/worker.js'
       - 'public/cctv-player.js'
 permissions:
@@ -28,8 +29,9 @@ jobs:
               });
               const data = await res.json().catch(() => ({}));
               if (!res.ok) {
-                const code = String(data.error || '').match(/^[A-Z_]{1,60}$/)?.[0] || 'NO_ERROR_CODE';
-                throw Error(`HTTP ${res.status} · ${code} · upstream HTTP ${Number(data.detail?.status) || 'unknown'}`);
+                const code = [data.code, data.error?.code, data.error].filter(s => typeof s === 'string')
+                  .find(s => /^[A-Z_]{1,60}$/.test(s)) || 'NO_ERROR_CODE';
+                throw Error(`HTTP ${res.status} · ${code} · ${res.headers.get('content-type')?.split(';')[0]} · upstream HTTP ${Number(data.detail?.status) || 'unknown'}`);
               }
               const entries = cameraDirectory(data);
               const site = data.sites?.find(s => s.id === 'hapcheon-seobuk');

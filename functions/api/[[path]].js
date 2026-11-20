@@ -1,3 +1,4 @@
+import { servePagesCctv } from '../../lib/cctv-pages.mjs';
 import { getServiceKey } from '../../lib/bionda-core.js';
 import { completeBoundHourlyResponse } from '../../lib/hourly-roster.mjs';
 import worker from '../../cloudflare/worker.js';
@@ -16,6 +17,9 @@ export async function onRequest(context) {
         return context.next();
       }
     } catch {}
+  }
+  if (method === 'GET' && new URL(context.request.url).pathname === '/api/cctv') {
+    return servePagesCctv(context);
   }
   if (context.env?.API_WORKER && typeof context.env.API_WORKER.fetch === 'function') {
     const service = context.env.API_WORKER;

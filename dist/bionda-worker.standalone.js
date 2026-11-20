@@ -1683,7 +1683,7 @@ async function fetchItsCctvJson(env = {}, fetchImpl = fetch) {
 
     return { json, source: customSource ? 'custom' : 'its' };
   } catch (err) {
-    if (err && err.code) throw err;
+    if (err && err.detail) throw err;
     const aborted = controller.signal.aborted || (err && err.name === 'AbortError');
     throw cctvUpstreamError(
       aborted ? 'UPSTREAM_TIMEOUT' : 'UPSTREAM_UNREACHABLE',
@@ -1697,7 +1697,7 @@ async function fetchItsCctvJson(env = {}, fetchImpl = fetch) {
   }
 }
 
-async function buildCctvPayload(env = {}, fetchImpl = fetch) {
+async function readCctvPayload(env, fetchImpl) {
   const { json, source } = await fetchItsCctvJson(env, fetchImpl);
 
   const rawItems = findCctvArray(json) || [];
@@ -1737,6 +1737,19 @@ async function buildCctvPayload(env = {}, fetchImpl = fetch) {
     sites,
     stats
   };
+}
+
+async function buildCctvPayload(env = {}, fetchImpl = fetch) {
+  if (!String(env.CCTV_SOURCE_URL || '').trim() || !String(env.ITS_API_KEY || '').trim()) {
+    return readCctvPayload(env, fetchImpl);
+  }
+  try {
+    const mirror = await readCctvPayload(env, fetchImpl);
+    if (mirror.count) return mirror;
+  } catch {
+    // An unavailable mirror must not disable the configured ITS feed.
+  }
+  return readCctvPayload({ ...env, CCTV_SOURCE_URL: '' }, fetchImpl);
 }
 
 
@@ -1781,7 +1794,7 @@ function allow(ip) {
   return hit.n <= 240;
 }
 
-function buildCorsHeaders(request, env = {}) {
+export function buildCorsHeaders(request, env = {}) {
   const headers = new Headers();
   const allowList = String(env.CORS_ORIGINS || '')
     .split(',')
