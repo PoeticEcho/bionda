@@ -635,3 +635,138 @@ test('12개 읍·면·동 1시간 단기예보(SHORT_TERM_12_REGIONS), 강수·�
   assert.equal(isUltraUpdateDue(src0500, Date.parse('2026-11-19T06:36:10+09:00')), true);
   assert.equal(msUntilNextUltraRelease(Date.parse('2026-11-19T06:30:00+09:00'), 36, 15), 375000);
 });
+
+test('예비살포 기준(대기≤4°C·노면≤2°C·비 시작, 새벽 00~08시 영하→0°C 상승 어는비)과 재살포 기준(3h 경과·습윤·≤4°C) 및 특보해제 복귀 지시를 검증한다', async () => {
+  const {
+    iceOutlook,
+    evaluateResaltCard,
+    evaluateStandbyReturnDirective,
+    isSnowRelatedWarning
+  } = await import('../public/ice.js');
+
+  // 1. 예비살포 조건 ①: 대기 3.5°C(≤4°C), 노면 1.8°C(≤2°C), 비가 내리기 시작할 때
+  const rainCold = iceOutlook(
+    { time: '2026-11-20T13:00', temp: 3.5, humidity: 85, wind: 2.0, code: 61, precip: 0.8 },
+    [],
+    [
+      { time: '2026-11-20T14:00', temp: 3.6, humidity: 86, wind: 2.0, code: 61, precip: 0.6 },
+      { time: '2026-11-20T15:00', temp: 4.5, humidity: 80, wind: 2.0, code: 3, precip: 0 }
+    ],
+    { temp: 3.5, roadTemp: 1.8, surfaceCode: 2, dayPrecip: 0.8 },
+    []
+  );
+  assert.equal(rainCold.rank, 2);
+  assert.equal(rainCold.samples[0].presaltRainCold, true);
+  assert.equal(rainCold.decisionCards[1].stageId, 'presalt');
+  assert.equal(rainCold.decisionCards[1].state, 'urgent');
+  assert.match(rainCold.decisionCards[1].detail, /대기 ≤4°C · 노면 ≤2°C · 강우 시작/);
+
+  // 2. 예비살포 조건 ②: 새벽 00~08시 영하(-1.5°C)에서 0°C(0.2°C)로 상승하며 강우/어는비 예상
+  const dawnFreeze = iceOutlook(
+    { time: '2026-11-20T03:00', temp: -1.5, humidity: 75, wind: 1.5, code: 3, precip: 0 },
+    [{ time: '2026-11-20T02:00', temp: -2.0, humidity: 72, wind: 1.5, code: 3, precip: 0 }],
+    [
+      { time: '2026-11-20T04:00', temp: -1.0, humidity: 80, wind: 1.5, code: 3, precip: 0 },
+      { time: '2026-11-20T05:00', temp: 0.2, humidity: 90, wind: 2.0, code: 61, precip: 1.0 }
+    ],
+    { temp: -1.5, roadTemp: -2.2, surfaceCode: 1, dayPrecip: 0 },
+    []
+  );
+  assert.equal(dawnFreeze.rank, 2);
+  assert.equal(dawnFreeze.samples[2].dawnFreezingRain, true);
+  assert.equal(dawnFreeze.decisionCards[1].state, 'urgent');
+  assert.match(dawnFreeze.decisionCards[1].detail, /어는비\(00~08시 영하→0°C 상승\)/);
+
+  // 3. 재살포 기준: 살포시각 입력 시에만 재살포 카드로 전환 (예비살포 / 본살포 동일)
+  const nowMs = Date.parse('2026-11-20T10:00:00+09:00');
+  const basePresalt = { stageId: 'presalt', title: '예비살포', subtitle: '(습염 사전 살포)', status: '즉시 출동', detail: '...', state: 'urgent' };
+  const baseMainplow = { stageId: 'mainplow', title: '본살포', subtitle: '(제설삽날·연속 살포)', status: '대기', detail: '...', state: 'idle' };
+
+  // 3-a. 1시간 30분 경과 (<3h) -> 재살포 대기
+  const waitCard = evaluateResaltCard(basePresalt, nowMs - 90 * 60000, {
+    nowMs, airTemp: 2.5, roadTemp: 1.8, surfaceWet: true, surfaceState: '습윤'
+  });
+  assert.equal(waitCard.isResalt, true);
+  assert.equal(waitCard.resaltStage, 'waiting');
+  assert.equal(waitCard.title, '재살포 대기');
+  assert.equal(waitCard.state, 'watch');
+
+  // 3-b. 3시간 10분 경과 + 노면 습윤 + 대기 3.8°C (≤4°C) -> 재살포 지시 (urgent)
+  const triggerAirCard = evaluateResaltCard(basePresalt, nowMs - 190 * 60000, {
+    nowMs, airTemp: 3.8, roadTemp: 4.5, surfaceWet: true, surfaceState: '습윤'
+  });
+  assert.equal(triggerAirCard.isResalt, true);
+  assert.equal(triggerAirCard.resaltStage, 'triggered');
+  assert.equal(triggerAirCard.title, '재살포 지시');
+  assert.equal(triggerAirCard.state, 'urgent');
+  assert.equal(triggerAirCard.pcChip, '🔁 재살포 · 즉시');
+
+  // 3-c. 본살포도 동일: 3시간 경과 + 노면 습윤 + 노면온도 3.5°C (대기 5.0°C여도 노면≤4°C 충족) -> 재살포 지시
+  const triggerRoadMain = evaluateResaltCard(baseMainplow, nowMs - 180 * 60000, {
+    nowMs, airTemp: 5.0, roadTemp: 3.5, surfaceWet: true, surfaceState: '젖음', stageLabel: '본살포'
+  });
+  assert.equal(triggerRoadMain.resaltStage, 'triggered');
+  assert.equal(triggerRoadMain.state, 'urgent');
+  assert.match(triggerRoadMain.subtitle, /본살포/);
+
+  // 3-d. 3시간 경과했으나 노면 건조 -> 조건 미충족 (idle)
+  const dryCard = evaluateResaltCard(basePresalt, nowMs - 200 * 60000, {
+    nowMs, airTemp: 2.0, roadTemp: 1.0, surfaceWet: false, surfaceState: '건조'
+  });
+  assert.equal(dryCard.resaltStage, 'cleared');
+  assert.equal(dryCard.state, 'idle');
+
+  // 3-e. 3시간 경과 + 습윤이나 대기·노면 모두 >4°C -> 조건 미충족 (idle)
+  const warmWetCard = evaluateResaltCard(basePresalt, nowMs - 200 * 60000, {
+    nowMs, airTemp: 6.2, roadTemp: 5.4, surfaceWet: true, surfaceState: '습윤'
+  });
+  assert.equal(warmWetCard.resaltStage, 'cleared');
+  assert.equal(warmWetCard.state, 'idle');
+
+  // 4. 제설 관련 특보 해제 시 상단 기준 확인 후 대기 차량 복귀 지시 / 보류 검증
+  assert.equal(isSnowRelatedWarning({ kind: '대설', title: '대설주의보' }), true);
+  assert.equal(isSnowRelatedWarning({ kind: '호우', title: '호우주의보' }), false);
+
+  // 4-a. 대설특보 해제 + 상단 기준 모두 해소 -> 복귀 지시 (return_ok)
+  const calmIce = iceOutlook(
+    { time: '2026-11-20T14:00', temp: 7.5, humidity: 55, wind: 2.0, code: 0, precip: 0 },
+    [],
+    [{ time: '2026-11-20T15:00', temp: 8.0, humidity: 50, wind: 2.0, code: 0, precip: 0 }],
+    { temp: 7.5, roadTemp: 8.2, surfaceCode: 1, dayPrecip: 0 },
+    []
+  );
+  const returnOk = evaluateStandbyReturnDirective({
+    recentlyCleared: true,
+    clearedTitles: ['대설주의보'],
+    hasActiveSnowWrn: false,
+    ice: calmIce,
+    roadRisk: { iceLevel: 0 },
+    resolvedCards: calmIce.decisionCards
+  });
+  assert.equal(returnOk.status, 'return_ok');
+  assert.match(returnOk.text, /대기 차량 복귀 지시/);
+
+  // 4-b. 대설특보 해제되었으나 재살포 지시 또는 예비살포/결빙 조건 잔존 -> 복귀 보류 (return_hold)
+  const returnHold = evaluateStandbyReturnDirective({
+    recentlyCleared: true,
+    clearedTitles: ['대설경보'],
+    hasActiveSnowWrn: false,
+    ice: calmIce,
+    roadRisk: { iceLevel: 2 },
+    resolvedCards: [calmIce.decisionCards[0], triggerAirCard, calmIce.decisionCards[2], calmIce.decisionCards[3]]
+  });
+  assert.equal(returnHold.status, 'return_hold');
+  assert.ok(returnHold.blockingReasons.some(r => r.includes('재살포')));
+  assert.ok(returnHold.blockingReasons.some(r => r.includes('도로살얼음')));
+
+  // 4-c. 특보가 아직 발효 중이면 null
+  const stillActive = evaluateStandbyReturnDirective({
+    recentlyCleared: true,
+    clearedTitles: ['대설주의보'],
+    hasActiveSnowWrn: true,
+    ice: calmIce,
+    roadRisk: { iceLevel: 0 },
+    resolvedCards: calmIce.decisionCards
+  });
+  assert.equal(stillActive, null);
+});

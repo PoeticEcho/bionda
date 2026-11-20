@@ -1,7 +1,15 @@
 import { loadWeather, loadProbabilities, prefetchOpenMeteo, seedKmaForecast } from './weather.js';
 import { loadOverviewBundle, loadObservation, loadRoadStations, loadRoadRisk, seedOverviewCache, getLastObsError } from './observations.js';
 import { fetchBatchWarnings, buildWarningSummary, buildWarningsFromApi } from './warnings.js';
-import { classifySeverityTier, isRoadRiskEscalated, ROAD_RISK_LABELS, FOG_RISK_LABELS } from './ice.js';
+import {
+  classifySeverityTier,
+  isRoadRiskEscalated,
+  ROAD_RISK_LABELS,
+  FOG_RISK_LABELS,
+  evaluateResaltCard,
+  isSnowRelatedWarning,
+  evaluateStandbyReturnDirective
+} from './ice.js';
 import { renderOverviewCanvas, renderDetailCanvas, canvasToJpgBlob } from './share.js';
 import { apiUrl, getApiBase, setApiBase, probeBackend, isBackendAvailable, getBackendStatusSnapshot } from './config.js';
 import { applyHeroScene, buildHeroSceneInputFromRecord, clearHeroScene } from './hero-scenes.js';
@@ -1206,12 +1214,168 @@ function persistAck() {
   } catch {}
 }
 
+// 세부페이지 예비살포/본살포 살포시각 기록 (입력 시에만 재살포 카드로 전환)
+const SPREAD_LOG_KEY = 'weather-watch:spread-log:v1';
+const SPREAD_MAX_AGE_MS = 24 * 3600000;
+let spreadLogs = {};
+let activeSpreadEditor = null; // { placeKey, stageId } | null
+try {
+  spreadLogs = JSON.parse(localStorage.getItem(SPREAD_LOG_KEY) || '{}') || {};
+} catch {
+  spreadLogs = {};
+}
+function persistSpreadLogs() {
+  try {
+    localStorage.setItem(SPREAD_LOG_KEY, JSON.stringify(spreadLogs));
+  } catch {}
+}
+function getSpreadEntry(place, stageId, nowMs = Date.now()) {
+  if (!place || !stageId) return null;
+  const id = coord(place);
+  const entry = spreadLogs[id]?.[stageId];
+  if (!entry || !Number.isFinite(entry.atMs)) return null;
+  if (nowMs - entry.atMs > SPREAD_MAX_AGE_MS) {
+    delete spreadLogs[id][stageId];
+    persistSpreadLogs();
+    return null;
+  }
+  return entry;
+}
+function setSpreadTime(place, stageId, atMs) {
+  const id = coord(place);
+  if (!spreadLogs[id]) spreadLogs[id] = {};
+  spreadLogs[id][stageId] = { atMs };
+  persistSpreadLogs();
+}
+function clearSpreadTime(place, stageId) {
+  const id = coord(place);
+  if (spreadLogs[id]) {
+    delete spreadLogs[id][stageId];
+    if (!Object.keys(spreadLogs[id]).length) delete spreadLogs[id];
+    persistSpreadLogs();
+  }
+}
+function formatKstClock(ms = Date.now()) {
+  const d = new Date(ms + 9 * 3600000);
+  return String(d.getUTCHours()).padStart(2, '0') + ':' + String(d.getUTCMinutes()).padStart(2, '0');
+}
+function parseKstHhmmToMs(hhmm, nowMs = Date.now()) {
+  const m = String(hhmm || '').trim().match(/^(\d{2}):(\d{2})$/);
+  if (!m) return null;
+  const hh = Number(m[1]), mm = Number(m[2]);
+  if (hh < 0 || hh > 23 || mm < 0 || mm > 59) return null;
+  const kstNow = new Date(nowMs + 9 * 3600000);
+  const y = kstNow.getUTCFullYear();
+  const mo = String(kstNow.getUTCMonth() + 1).padStart(2, '0');
+  const da = String(kstNow.getUTCDate()).padStart(2, '0');
+  let epoch = Date.parse(`${y}-${mo}-${da}T${String(hh).padStart(2, '0')}:${String(mm).padStart(2, '0')}:00+09:00`);
+  if (!Number.isFinite(epoch)) return null;
+  // 입력 시각이 현재보다 10분 이상 미래면 자정 이전(전일) 살포 시각으로 해석
+  if (epoch - nowMs > 10 * 60000) epoch -= 24 * 3600000;
+  return epoch;
+}
+
+// 제설 관련 기상특보(대설·한파 등) 해제 추적 (대기 차량 복귀 지시용)
+const SNOW_WRN_HIST_KEY = 'weather-watch:snow-wrn-hist:v1';
+const SNOW_WRN_CLEARED_TTL_MS = 6 * 3600000;
+let snowWrnHistory = {};
+try {
+  snowWrnHistory = JSON.parse(localStorage.getItem(SNOW_WRN_HIST_KEY) || '{}') || {};
+} catch {
+  snowWrnHistory = {};
+}
+function persistSnowWrnHistory() {
+  try {
+    localStorage.setItem(SNOW_WRN_HIST_KEY, JSON.stringify(snowWrnHistory));
+  } catch {}
+}
+function extractSnowWarnings(wrn) {
+  const list = Array.isArray(wrn?.raw) && wrn.raw.length
+    ? wrn.raw
+    : (Array.isArray(wrn?.tooltipLines) ? wrn.tooltipLines : []);
+  return list.filter(isSnowRelatedWarning);
+}
+function syncSnowWarningHistory(place, wrn, nowMs = Date.now()) {
+  if (!place || !wrn) return;
+  const id = coord(place);
+  const snowWrns = extractSnowWarnings(wrn);
+  const prev = snowWrnHistory[id];
+  if (snowWrns.length > 0) {
+    const titles = [...new Set(snowWrns.map(w => w.title || w.kind).filter(Boolean))];
+    snowWrnHistory[id] = { active: true, titles, lastSeenMs: nowMs, clearedAtMs: null, dismissed: false };
+    persistSnowWrnHistory();
+  } else if (prev?.active) {
+    snowWrnHistory[id] = {
+      active: false,
+      lastTitles: prev.titles || ['제설 관련 특보'],
+      clearedAtMs: nowMs,
+      dismissed: false
+    };
+    persistSnowWrnHistory();
+  } else if (prev && !prev.active && prev.clearedAtMs && nowMs - prev.clearedAtMs > SNOW_WRN_CLEARED_TTL_MS) {
+    delete snowWrnHistory[id];
+    persistSnowWrnHistory();
+  }
+}
+function getSnowWarningClearedState(place, wrn, nowMs = Date.now()) {
+  const id = coord(place);
+  const hasActiveSnowWrn = extractSnowWarnings(wrn).length > 0;
+  const entry = snowWrnHistory[id];
+  if (!entry || entry.active || entry.dismissed || !entry.clearedAtMs) {
+    return { recentlyCleared: false, clearedTitles: [], hasActiveSnowWrn };
+  }
+  if (nowMs - entry.clearedAtMs > SNOW_WRN_CLEARED_TTL_MS) {
+    delete snowWrnHistory[id];
+    persistSnowWrnHistory();
+    return { recentlyCleared: false, clearedTitles: [], hasActiveSnowWrn };
+  }
+  return {
+    recentlyCleared: true,
+    clearedTitles: entry.lastTitles || ['제설 관련 특보'],
+    hasActiveSnowWrn
+  };
+}
+
+function resolveDecisionCardsForPlace(place, rec, nowMs = Date.now()) {
+  const baseCards = rec?.w?.ice?.decisionCards || [
+    { stageId: 'preheat', title: '제설차 시동 ON', subtitle: '(살포기 유압 예열)', status: '대기', detail: '결빙·강설 신호 없음', state: 'idle' },
+    { stageId: 'presalt', title: '예비살포', subtitle: '(습염 사전 살포)', status: '대기', detail: '노면 결빙 위험 없음', state: 'idle' },
+    { stageId: 'mainplow', title: '본살포', subtitle: '(제설삽날·연속 살포)', status: '대기', detail: '강설 1.0cm/h 이상 시', state: 'idle' },
+    { stageId: 'floodwind', title: '수방 · 횡풍', subtitle: '(배수로·교량 안전)', status: '정상', detail: '강수·강풍 특이사항 없음', state: 'idle' }
+  ];
+  if (!place) return baseCards;
+  const ice = rec?.w?.ice;
+  const obs = rec?.o;
+  const airTemp = Number.isFinite(obs?.temp) ? obs.temp : (Number.isFinite(ice?.curTemp) ? ice.curTemp : rec?.w?.current?.temp ?? null);
+  const roadTemp = Number.isFinite(obs?.bridgeRoadTemp)
+    ? obs.bridgeRoadTemp
+    : Number.isFinite(obs?.roadTemp)
+      ? obs.roadTemp
+      : (Number.isFinite(ice?.bridgeTemp) ? ice.bridgeTemp : null);
+  const surfaceWet = ice?.curSurfaceWet ?? Boolean((obs?.surfaceCode >= 2 && obs?.surfaceCode <= 6) || (rec?.w?.current?.precip > 0));
+  const surfaceState = obs?.surfaceState || ice?.curSurfaceState || (surfaceWet ? '습윤' : '건조');
+
+  return baseCards.map(card => {
+    if (!card || (card.stageId !== 'presalt' && card.stageId !== 'mainplow')) return card;
+    const logged = getSpreadEntry(place, card.stageId, nowMs);
+    if (!logged) return card;
+    return evaluateResaltCard(card, logged.atMs, {
+      nowMs,
+      airTemp,
+      roadTemp,
+      surfaceWet,
+      surfaceState,
+      stageLabel: card.stageId === 'mainplow' ? '본살포' : '예비살포'
+    });
+  });
+}
+
 function getActionSignature(cards) {
   return cards.map(c => `${c.stageId}:${c.state}:${c.pcChip}`).join('|');
 }
 
-function getActiveActionCards(rec) {
-  const cards = rec?.w?.ice?.decisionCards || [];
+function getActiveActionCards(rec, place = null) {
+  const cards = place ? resolveDecisionCardsForPlace(place, rec) : (rec?.w?.ice?.decisionCards || []);
   return cards
     .filter(c => c && c.pcChip && (c.state === 'urgent' || c.state === 'watch'))
     .sort((a, b) => {
@@ -1224,7 +1388,7 @@ function getActiveActionCards(rec) {
 }
 
 function getUnackedActionCards(place, rec) {
-  const active = getActiveActionCards(rec);
+  const active = getActiveActionCards(rec, place);
   if (!active.length) return [];
   const sig = getActionSignature(active);
   const id = coord(place);
@@ -1888,23 +2052,64 @@ function renderDetail() {
   const decisionHead = $('decisionHead');
   if (decisionHead) decisionHead.hidden = !settings.showActionCards;
   const decisionGrid = $('decisionCardsGrid');
+  const spreadEditor = $('spreadTimeEditor');
+  const resolvedCards = resolveDecisionCardsForPlace(p, r);
+  const placeKey = coord(p);
+
   if (decisionGrid) {
     decisionGrid.hidden = !settings.showActionCards;
     if (settings.showActionCards) {
-      const cardsList = w?.ice?.decisionCards || [
-        { title: '제설차 시동 ON', subtitle: '(살포기 유압 예열)', status: '대기', detail: '결빙·강설 신호 없음', state: 'idle' },
-        { title: '예비살포', subtitle: '(습염 사전 살포)', status: '대기', detail: '노면 결빙 위험 없음', state: 'idle' },
-        { title: '본살포', subtitle: '(제설삽날·연속 살포)', status: '대기', detail: '강설 1.0cm/h 이상 시', state: 'idle' },
-        { title: '수방 · 횡풍', subtitle: '(배수로·교량 안전)', status: '정상', detail: '강수·강풍 특이사항 없음', state: 'idle' }
-      ];
       decisionGrid.replaceChildren(
-        ...cardsList.map(dc => {
-          const card = el('div', '', `decision-card state-${dc.state || 'idle'}`);
+        ...resolvedCards.map(dc => {
+          const isSpreadEditable = dc.stageId === 'presalt' || dc.stageId === 'mainplow';
+          const isEditing =
+            isSpreadEditable &&
+            activeSpreadEditor &&
+            activeSpreadEditor.placeKey === placeKey &&
+            activeSpreadEditor.stageId === dc.stageId;
+          const cardCls = [
+            'decision-card',
+            `state-${dc.state || 'idle'}`,
+            isSpreadEditable ? 'is-clickable' : '',
+            isEditing ? 'is-editing' : ''
+          ].filter(Boolean).join(' ');
+          const card = el('div', '', cardCls);
           const top = el('div', '', 'dc-top');
           const titleWrap = el('div');
           titleWrap.append(el('div', dc.title, 'dc-title'), el('div', dc.subtitle, 'dc-sub'));
           top.append(titleWrap, el('span', dc.status, 'dc-badge'));
           card.append(top, el('div', dc.detail, 'dc-detail'));
+
+          if (isSpreadEditable) {
+            card.setAttribute('role', 'button');
+            card.setAttribute('tabindex', '0');
+            card.setAttribute(
+              'aria-label',
+              `${dc.stageId === 'mainplow' ? '본살포' : '예비살포'} 살포 시각 입력 및 재살포 전환`
+            );
+            const hint = el('div', '', 'dc-click-hint');
+            if (dc.isResalt) {
+              hint.append(el('span', `⏱ ${dc.spreadClock} 기록됨`), el('span', '수정/해제 ▾'));
+            } else {
+              hint.append(el('span', '⏱ 살포시각 입력 → 재살포 전환'), el('span', '클릭 ▾'));
+            }
+            card.append(hint);
+            const toggleEditor = () => {
+              if (activeSpreadEditor && activeSpreadEditor.placeKey === placeKey && activeSpreadEditor.stageId === dc.stageId) {
+                activeSpreadEditor = null;
+              } else {
+                activeSpreadEditor = { placeKey, stageId: dc.stageId };
+              }
+              renderDetail();
+            };
+            card.onclick = toggleEditor;
+            card.onkeydown = ev => {
+              if (ev.key === 'Enter' || ev.key === ' ') {
+                ev.preventDefault();
+                toggleEditor();
+              }
+            };
+          }
           return card;
         })
       );
@@ -1913,10 +2118,115 @@ function renderDetail() {
     }
   }
 
+  if (spreadEditor) {
+    const showEditor =
+      settings.showActionCards &&
+      activeSpreadEditor &&
+      activeSpreadEditor.placeKey === placeKey &&
+      (activeSpreadEditor.stageId === 'presalt' || activeSpreadEditor.stageId === 'mainplow');
+    spreadEditor.hidden = !showEditor;
+    spreadEditor.replaceChildren();
+    if (showEditor) {
+      const stageId = activeSpreadEditor.stageId;
+      const stageLabel = stageId === 'mainplow' ? '본살포' : '예비살포';
+      const existing = getSpreadEntry(p, stageId);
+      const defaultHhmm = existing ? formatKstClock(existing.atMs) : formatKstClock(Date.now());
+
+      const head = el('div', '', 'spread-editor-head');
+      head.append(
+        el('span', `${stageId === 'mainplow' ? '❄' : '🚜'} ${p.name} · ${stageLabel} 살포 시각 입력`),
+        el('small', existing ? `현재 기록: ${defaultHhmm}` : '미입력')
+      );
+      const desc = el(
+        'p',
+        '살포 시각을 입력하면 해당 카드가 재살포 카드로 전환되며, 3시간 경과 후 노면 습윤 + 대기·노면 ≤4°C 시 재살포를 지시합니다.',
+        'spread-editor-desc'
+      );
+
+      const row = el('div', '', 'spread-editor-row');
+      const nowBtn = el('button', '⏱ 지금(현재 시각)', 'spread-btn-now');
+      nowBtn.type = 'button';
+      nowBtn.onclick = () => {
+        setSpreadTime(p, stageId, Date.now());
+        activeSpreadEditor = null;
+        renderDetail();
+      };
+
+      const timeInput = document.createElement('input');
+      timeInput.type = 'time';
+      timeInput.className = 'spread-time-input';
+      timeInput.value = defaultHhmm;
+      timeInput.setAttribute('aria-label', `${stageLabel} 살포 시각`);
+
+      const applyBtn = el('button', '시간 적용', 'spread-btn-apply');
+      applyBtn.type = 'button';
+      applyBtn.onclick = () => {
+        const ms = parseKstHhmmToMs(timeInput.value);
+        if (!Number.isFinite(ms)) return;
+        setSpreadTime(p, stageId, ms);
+        activeSpreadEditor = null;
+        renderDetail();
+      };
+
+      row.append(nowBtn, timeInput, applyBtn);
+      if (existing) {
+        const clearBtn = el('button', '기록 해제', 'spread-btn-clear');
+        clearBtn.type = 'button';
+        clearBtn.onclick = () => {
+          clearSpreadTime(p, stageId);
+          activeSpreadEditor = null;
+          renderDetail();
+        };
+        row.append(clearBtn);
+      }
+
+      const closeBtn = el('button', '닫기', 'spread-btn-close');
+      closeBtn.type = 'button';
+      closeBtn.onclick = () => {
+        activeSpreadEditor = null;
+        renderDetail();
+      };
+      row.append(closeBtn);
+
+      spreadEditor.append(head, desc, row);
+    }
+  }
+
   const guideContainer = $('actionGuides');
   guideContainer.hidden = !settings.showActionCards;
   guideContainer.replaceChildren();
   if (settings.showActionCards) {
+    // 재살포 지시 / 추적 배너 최우선 표시
+    for (const rc of resolvedCards) {
+      if (rc?.isResalt && rc.guideBanner) {
+        guideContainer.append(el('div', rc.guideBanner, `guide-banner rank-${rc.state === 'urgent' ? 2 : 1}`));
+      }
+    }
+    // 제설 관련 특보 해제 시 상단 기준 확인 후 대기 차량 복귀 지시 / 보류 배너
+    const wrnClearState = getSnowWarningClearedState(p, wrn);
+    const returnDir = evaluateStandbyReturnDirective({
+      recentlyCleared: wrnClearState.recentlyCleared,
+      clearedTitles: wrnClearState.clearedTitles,
+      hasActiveSnowWrn: wrnClearState.hasActiveSnowWrn,
+      ice: w?.ice,
+      roadRisk: r?.roadRisk,
+      resolvedCards
+    });
+    if (returnDir) {
+      const retBanner = el('div', '', `guide-banner ${returnDir.status === 'return_ok' ? 'return-ok' : 'return-hold'}`);
+      retBanner.append(el('span', returnDir.text));
+      const dismissBtn = el('button', '확인', 'guide-dismiss-btn');
+      dismissBtn.type = 'button';
+      dismissBtn.onclick = () => {
+        if (snowWrnHistory[placeKey]) {
+          snowWrnHistory[placeKey].dismissed = true;
+          persistSnowWrnHistory();
+        }
+        renderDetail();
+      };
+      retBanner.append(dismissBtn);
+      guideContainer.append(retBanner);
+    }
     if (w?.ice?.snowActions?.length) {
       for (const sa of w.ice.snowActions) {
         guideContainer.append(el('div', sa.text, `guide-banner rank-${sa.rank}`));
@@ -2003,7 +2313,10 @@ async function pollWarnings(force = false) {
       if (batch?.resultsByKey) {
         for (const p of list) {
           const wrn = batch.resultsByKey.get(coord(p));
-          if (wrn) record(p).wrn = wrn;
+          if (wrn) {
+            record(p).wrn = wrn;
+            syncSnowWarningHistory(p, wrn);
+          }
         }
       }
     } catch {}
@@ -2197,6 +2510,7 @@ export async function refresh(forceOrOpts = false) {
           if (entry.forecast?.ok) seedKmaForecast(p, entry.forecast);
           if (Array.isArray(entry.warnings)) {
             r.wrn = buildWarningsFromApi(entry.warnings);
+            syncSnowWarningHistory(p, r.wrn);
             r.checked = Date.now();
           }
           bundledKeys.add(coord(p));
@@ -2968,6 +3282,13 @@ setInterval(() => {
 setInterval(() => {
   if (!document.hidden) pollWarnings();
 }, 120000);
+setInterval(() => {
+  if (!document.hidden && detailPlace && settings.showActionCards && !activeSpreadEditor) {
+    if (getSpreadEntry(detailPlace, 'presalt') || getSpreadEntry(detailPlace, 'mainplow')) {
+      renderDetail();
+    }
+  }
+}, 60000);
 document.addEventListener('visibilitychange', () => {
   if (!document.hidden) {
     syncWakeLock();
