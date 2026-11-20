@@ -1,0 +1,44 @@
+name: Check public CCTV directory
+on:
+  workflow_dispatch:
+  push:
+    branches: [main]
+    paths:
+      - '.github/workflows/cctv-check.yml'
+      - 'functions/api/**'
+      - 'lib/cctv-its.js'
+      - 'cloudflare/worker.js'
+      - 'public/cctv-player.js'
+permissions:
+  contents: read
+jobs:
+  directory:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v6
+      - name: Check the public minimap and viewer directory
+        run: |
+          node --input-type=module <<'JS'
+          import { cameraDirectory } from './public/cctv-order.js';
+          for (let attempt = 1; attempt <= 4; attempt++) {
+            try {
+              const res = await fetch('https://bionda.pages.dev/api/cctv', {
+                headers: { Accept: 'application/json' }, signal: AbortSignal.timeout(35000)
+              });
+              const data = await res.json().catch(() => ({}));
+              if (!res.ok) {
+                const code = String(data.error || '').match(/^[A-Z_]{1,60}$/)?.[0] || 'NO_ERROR_CODE';
+                throw Error(`HTTP ${res.status} · ${code} · upstream HTTP ${Number(data.detail?.status) || 'unknown'}`);
+              }
+              const entries = cameraDirectory(data);
+              const site = data.sites?.find(s => s.id === 'hapcheon-seobuk');
+              if (!site || !entries.some(e => e.record?.name === '야로대교1')) throw Error('야로대교1 or Hapcheon site missing');
+              console.log(`CCTV ${data.count}, corridor ${entries.length}, cache ${data.cache}`);
+              break;
+            } catch (err) {
+              if (attempt === 4) { console.log('::error::' + err.message); process.exitCode = 1; }
+              else { console.log('::warning::' + err.message); await new Promise(r => setTimeout(r, 20000)); }
+            }
+          }
+          JS
