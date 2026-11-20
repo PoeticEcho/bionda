@@ -770,3 +770,19 @@ test('예비살포 기준(대기≤4°C·노면≤2°C·비 시작, 새벽 00~08
   });
   assert.equal(stillActive, null);
 });
+
+test('실측 노면·강우 시작·새벽 상승 추세를 구분하고 결측 시 복귀를 보류한다', async () => {
+  const { iceOutlook, evaluateStandbyReturnDirective } = await import('../public/ice.js');
+  const row = { time: '2026-11-20T04:00', temp: 3, humidity: 85, wind: 2, precip: 1, code: 61 };
+  const obs = { temp: 3, roadTemp: 3, surfaceCode: 1 };
+  const outlook = iceOutlook(row, [], [], obs);
+  assert.equal(outlook.samples[0].presaltRainCold, false);
+  assert.equal(outlook.curSurfaceWet, false);
+  const earlier = { ...row, time: '2026-11-20T03:00', temp: -0.5 };
+  const cooling = iceOutlook({ ...row, temp: -0.8 }, [earlier], [], { roadTemp: 0 });
+  assert.equal(cooling.samples[0].dawnFreezingRain, false);
+  assert.equal(cooling.samples[0].presaltRainCold, false);
+  const dry = iceOutlook({ ...row, precip: 0, code: 0 }, [earlier], [], { dayPrecip: 5 });
+  assert.equal(dry.curSurfaceWet, false);
+  assert.equal(evaluateStandbyReturnDirective({ recentlyCleared: true }).status, 'return_hold');
+});

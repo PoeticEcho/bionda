@@ -488,6 +488,7 @@ async function fetchOverviewBundle({ placesParam = '', line = ROAD_LINE_CODE, ro
         name: p.name,
         observation,
         forecast: fcst,
+        warningsConfirmed: Boolean(getServiceKey()) && wrnSettled.status === 'fulfilled' && !allWarnings._stale,
         warnings: matchedWrn
       };
     }
@@ -836,7 +837,7 @@ const server = http.createServer(async (req, res) => {
               warnings: sortWarnings(all.filter(w => warningMatchesPlace(w, p.name, p.lat, p.lon, capPolyMap)))
             };
           }
-          return sendJson(res, 200, { ok: true, mode: 'batch', updatedAt: new Date().toISOString(), stale: isStale, items, totalNational: all.length }, { 'Cache-Control': cacheCtrl });
+          return sendJson(res, 200, { ok: true, mode: 'batch', warningsConfirmed: Boolean(getServiceKey()) && !isStale, updatedAt: new Date().toISOString(), stale: isStale, items, totalNational: all.length }, { 'Cache-Control': cacheCtrl });
         }
         const matched = name
           ? all.filter(w => warningMatchesPlace(w, name, lat, lon, capPolyMap))

@@ -461,7 +461,7 @@ async function fetchOverviewBundle(env, { placesParam = '', line = getRoadLineCo
     // 1) 도로관측 · 012위험 · 특보 · 첫 번째 격자(ultra probe) 병렬 시작 후 나머지 격자는 2개씩 분할 (Cloudflare 6연결 한도 내 타임아웃 방지)
     const roadPromise = getRoadKey(env) ? fetchRoadStations(env, line, force).catch(() => null) : Promise.resolve(null);
     const riskPromise = getRoadKey(env) ? fetchRoadRisk(env, roadNum).catch(() => null) : Promise.resolve(null);
-    const wrnPromise = fetchWrnNowList(env).catch(() => []);
+    const wrnPromise = fetchWrnNowList(env).catch(() => null);
 
     const gridResults = new Map();
     let forecastPromise = Promise.resolve();
@@ -519,7 +519,8 @@ async function fetchOverviewBundle(env, { placesParam = '', line = getRoadLineCo
       })();
     }
 
-    const [roadData, roadRisk, allWarnings] = await Promise.all([roadPromise, riskPromise, wrnPromise, forecastPromise]);
+    const [roadData, roadRisk, warningResult] = await Promise.all([roadPromise, riskPromise, wrnPromise, forecastPromise]);
+    const allWarnings = warningResult || [];
     const hasSubZones = allWarnings.some(w => w.regUpKo && w.regKo !== w.regUpKo);
     const capPolyMap = hasSubZones ? await getCapPolygonMap() : new Map();
 
@@ -554,6 +555,7 @@ async function fetchOverviewBundle(env, { placesParam = '', line = getRoadLineCo
         name: p.name,
         observation,
         forecast: fcst,
+        warningsConfirmed: Boolean(getServiceKey(env)) && warningResult !== null && !allWarnings._stale,
         warnings: matchedWrn
       };
     }
@@ -965,7 +967,7 @@ export default {
             request,
             env,
             200,
-            { ok: true, mode: 'batch', updatedAt: new Date().toISOString(), stale: isStale, items, totalNational: all.length },
+            { ok: true, mode: 'batch', warningsConfirmed: Boolean(getServiceKey(env)) && !isStale, updatedAt: new Date().toISOString(), stale: isStale, items, totalNational: all.length },
             { 'Cache-Control': cacheCtrl }
           );
           if (!isStale) putEdgeCache(ctx, cacheKeyReq, res);

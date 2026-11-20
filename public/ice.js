@@ -16,6 +16,7 @@ function addHoursClock(clockStr, deltaHours) {
 }
 
 export function iceOutlook(current, history = [], forecast = [], obs = null, kmaHours = []) {
+  const rainCodes = [51, 53, 55, 56, 57, 61, 63, 65, 66, 67, 80, 81, 82];
   const previous = Array.isArray(history) ? history.slice() : [];
   const hadSnow24h = previous.some(x => Number.isFinite(x?.snow) && x.snow > 0) || (Number.isFinite(obs?.snowDepth) && obs.snowDepth > 0);
   const kmaByClock = new Map();
@@ -59,15 +60,12 @@ export function iceOutlook(current, history = [], forecast = [], obs = null, kma
     // 교량·응달 추정 노면온도 (실측 광학 노면온도가 있으면 현재 시각에 함께 반영)
     const estBridgeTemp = validTemp ? Number((r.temp - (night ? 3.0 : 1.5)).toFixed(1)) : null;
     const measuredRoadTemp = index === 0 ? (obs?.bridgeRoadTemp ?? obs?.roadTemp ?? null) : null;
-    const effectiveRoadTemp = Number.isFinite(measuredRoadTemp) && Number.isFinite(estBridgeTemp)
-      ? Math.min(measuredRoadTemp, estBridgeTemp)
-      : (measuredRoadTemp ?? estBridgeTemp);
+    const effectiveRoadTemp = measuredRoadTemp ?? estBridgeTemp;
 
     const recent = previous.filter(x => x && x.time < r.time).slice(-6);
     const prevSampleTemp = recent.length ? recent[recent.length - 1]?.temp : null;
-    const hadSubZeroRecent = recent.slice(-3).some(x => Number.isFinite(x?.temp) && x.temp < 0);
     const wet = (r.precip > 0) || (current?.precip > 0) || recent.some(x => x.precip > 0) || (index === 0 && (obs?.dayPrecip > 0 || (obs?.surfaceCode >= 2 && obs?.surfaceCode <= 6)));
-    const rainActive = (r.precip > 0) || Boolean(kmaMatch?.wet) || [51, 53, 55, 56, 57, 61, 63, 65, 66, 67, 80, 81, 82].includes(r.code);
+    const rainActive = (r.precip > 0) || Boolean(kmaMatch?.wet) || rainCodes.includes(r.code);
     const snowNow = (r.snow >= 0.1) || (r.snowPop >= 50) || (kmaMatch?.type?.includes('눈'));
     const fog = r.code === 45 || (index === 0 && Number.isFinite(obs?.visibility) && obs.visibility < 1000);
     const humid = Number.isFinite(r.humidity) && r.humidity >= 90;
@@ -80,14 +78,17 @@ export function iceOutlook(current, history = [], forecast = [], obs = null, kma
 
     // 예비살포 실무 기준:
     // ① 대기온도 ≤ 4°C, 노면온도 ≤ 2°C, 비(강수)가 내리기 시작할 때
-    const presaltRainCold = cold && Number.isFinite(effectiveRoadTemp) && effectiveRoadTemp <= 2.0 && rainActive;
+    const last = recent.at(-1);
+    const rainStarting = rainActive && !snowNow && !(last?.precip > 0 || rainCodes.includes(last?.code));
+    const airForPresalt = index === 0 && Number.isFinite(obs?.temp) ? obs.temp : r.temp;
+    const presaltRainCold = Number.isFinite(airForPresalt) && airForPresalt <= 4 && Number.isFinite(effectiveRoadTemp) && effectiveRoadTemp <= 2.0 && rainStarting;
     // ② 어는비: 새벽시간(00~08시) 영하에서 0°C 부근으로 온도 상승하며 강수/안개·결빙 예상
     const dawnWarmingFromSubZero =
       isDawnWindow &&
       validTemp &&
       r.temp <= 1.5 &&
-      ((Number.isFinite(prevSampleTemp) && prevSampleTemp < 0 && r.temp >= prevSampleTemp) || (hadSubZeroRecent && r.temp >= -1.0));
-    const dawnFreezingRain = dawnWarmingFromSubZero && (rainActive || fog || wet);
+      r.temp >= -1.0 && Number.isFinite(prevSampleTemp) && prevSampleTemp < 0 && r.temp > prevSampleTemp;
+    const dawnFreezingRain = dawnWarmingFromSubZero && rainActive && !snowNow;
 
     let level = '신호 없음', rank = 0, cause = '', shortCause = '', presaltReason = '';
     if (freezing) {
@@ -102,7 +103,7 @@ export function iceOutlook(current, history = [], forecast = [], obs = null, kma
       presaltReason = '어는비(00~08시 영하→0°C 상승) 결빙 예상';
     } else if (presaltRainCold) {
       rank = 2;
-      cause = `대기 ${r.temp.toFixed(1)}°C(≤4°C)·노면 ${effectiveRoadTemp.toFixed(1)}°C(≤2°C)·강우 시작 결빙 우려`;
+      cause = `대기 ${airForPresalt.toFixed(1)}°C(≤4°C)·노면 ${effectiveRoadTemp.toFixed(1)}°C(≤2°C)·강우 시작 결빙 우려`;
       shortCause = '저온·노면≤2°C·강우';
       presaltReason = `대기 ≤4°C · 노면 ≤2°C · 강우 시작`;
     } else if (validTemp && r.temp <= cautionTempLimit && (wet || fog || snowNow)) {
@@ -131,7 +132,7 @@ export function iceOutlook(current, history = [], forecast = [], obs = null, kma
     ));
     if (rank) level = rank === 2 ? '주의' : '관심';
     else if (missing) level = '자료 부족';
-    if (index > 0) previous.push(r);
+    previous.push(r);
     return {
       ...r,
       level,
@@ -458,8 +459,8 @@ export function iceOutlook(current, history = [], forecast = [], obs = null, kma
   const curSurfaceCode = obs?.surfaceCode;
   const curRainNow = Boolean(samples[0]?.rainActive || (Number.isFinite(obs?.precip) && obs.precip > 0));
   const curSurfaceWet = Number.isFinite(curSurfaceCode)
-    ? (curSurfaceCode >= 2 && curSurfaceCode <= 6) || curRainNow
-    : Boolean(samples[0]?.wet || curRainNow);
+    ? [2, 3, 6].includes(curSurfaceCode)
+    : curRainNow;
 
   return {
     level,
@@ -619,6 +620,10 @@ export function evaluateStandbyReturnDirective({
   const titlesText = (clearedTitles && clearedTitles.length ? clearedTitles.join('·') : '제설 관련 특보');
   const blockingReasons = [];
 
+  if (!Number.isFinite(ice?.curTemp) || ice?.level === '판단 보류' || !Number.isFinite(roadRisk?.iceLevel)) {
+    blockingReasons.push('기상·도로위험 자료 확인 필요');
+  }
+
   const cards = Array.isArray(resolvedCards) ? resolvedCards : (ice?.decisionCards || []);
   const presaltCard = cards.find(c => c?.stageId === 'presalt' || c?.originStageId === 'presalt');
   const mainPlowCard = cards.find(c => c?.stageId === 'mainplow' || c?.originStageId === 'mainplow');
@@ -642,7 +647,7 @@ export function evaluateStandbyReturnDirective({
   }
 
   // 4. 기상청 012 도로위험정보 확인
-  if ((roadRisk?.iceLevel || 0) >= 2) {
+  if ((roadRisk?.iceLevel || 0) >= 1) {
     blockingReasons.push(`도로살얼음 ${ROAD_RISK_LABELS[roadRisk.iceLevel] || '주의'}(${roadRisk.iceLevel}단계)`);
   }
 

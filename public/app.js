@@ -1,3 +1,5 @@
+import { ROUTE12_POLYLINE_KM, ROUTE12_PLACE_KM } from './route12.js';
+import { mountCctv } from './cctv-player.js';
 import { loadWeather, loadProbabilities, prefetchOpenMeteo, seedKmaForecast } from './weather.js';
 import { loadOverviewBundle, loadObservation, loadRoadStations, loadRoadRisk, seedOverviewCache, getLastObsError } from './observations.js';
 import { fetchBatchWarnings, buildWarningSummary, buildWarningsFromApi } from './warnings.js';
@@ -34,15 +36,15 @@ const el = (tag, txt = '', cls = '') => {
 
 // 광주대구선(14번 고속도로) 및 지리산·고령권역 기본 8개 관심지역
 export const presets = [
-  ['대구 달성군남부', '현풍읍', 35.697, 128.447],
-  ['함양중부', '지곡면', 35.566, 127.774],
-  ['거창군남부', '남상면', 35.644, 127.910],
-  ['합천군서북부', '야로면', 35.706, 128.168],
-  ['고령군', '대가야읍', 35.728, 128.263],
-  ['남원', '남원시청', 35.416, 127.390],
-  ['함양', '함양읍', 35.520, 127.725],
-  ['거창', '거창읍', 35.687, 127.910]
-].map(([name, site, lat, lon]) => ({ name, site, lat, lon }));
+  ['대구 달성군남부', '현풍읍', 35.697, 128.447, 'dalseong-nambu'],
+  ['함양중부', '지곡면', 35.566, 127.774, 'hamyang-jungbu'],
+  ['거창군남부', '남상면', 35.644, 127.910, 'geochang-nambu'],
+  ['합천군서북부', '야로면', 35.706, 128.168, 'hapcheon-seobuk'],
+  ['고령군', '대가야읍', 35.728, 128.263, 'goryeong'],
+  ['남원', '남원시청', 35.416, 127.390, 'namwon'],
+  ['함양', '함양읍', 35.520, 127.725, 'hamyang-eup'],
+  ['거창', '거창읍', 35.687, 127.910, 'geochang-eup']
+].map(([name, site, lat, lon, cctvSite]) => ({ name, site, lat, lon, cctvSite }));
 
 const NATIONWIDE_PLACES = [
   ...presets,
@@ -778,17 +780,6 @@ function updateUnifiedGlobalStamp() {
   return stampFormatted;
 }
 
-const ROUTE12_POLYLINE_KM = [
-  [48.8, 35.4117, 127.3233], [52.8, 35.4248, 127.3630], [56.8, 35.4334, 127.4033], [60.8, 35.4497, 127.4411],
-  [64.8, 35.4720, 127.4698], [68.8, 35.4910, 127.5061], [72.8, 35.4751, 127.5438], [76.8, 35.4831, 127.5846],
-  [80.8, 35.5119, 127.6065], [84.8, 35.5335, 127.6409], [88.8, 35.5415, 127.6835], [92.8, 35.5378, 127.7262],
-  [96.8, 35.5341, 127.7688], [100.8, 35.5512, 127.8065], [104.8, 35.5627, 127.8397], [108.8, 35.5903, 127.8668],
-  [112.8, 35.6197, 127.8887], [116.8, 35.6434, 127.9207], [120.8, 35.6772, 127.9330], [124.8, 35.7049, 127.9561],
-  [128.8, 35.7036, 127.9972], [132.8, 35.7074, 128.0397], [136.8, 35.7079, 128.0838], [140.8, 35.7058, 128.1275],
-  [144.8, 35.6927, 128.1672], [148.8, 35.7029, 128.2087], [152.8, 35.7016, 128.2507], [156.8, 35.7132, 128.2912],
-  [160.8, 35.7394, 128.3176], [164.8, 35.7527, 128.3578], [168.8, 35.7624, 128.3988], [172.8, 35.7744, 128.4371],
-  [175.9, 35.7918, 128.4629], [176.0, 35.7925, 128.4635]
-];
 
 const ROUTE12_ICS = [
   ['남원56k', 35.430, 127.394, -10],
@@ -800,16 +791,6 @@ const ROUTE12_ICS = [
   ['옥포176k', 35.792, 128.463, -8]
 ];
 
-const ROUTE12_PLACE_KM = {
-  '남원': 55.5,
-  '함양': 93.5,
-  '함양중부': 99.2,
-  '거창군남부': 115.9,
-  '거창': 120.5,
-  '합천군서북부': 145.5,
-  '고령군': 154.6,
-  '대구 달성군남부': 171.6
-};
 
 const ROUTE12_STN_KM_FALLBACK = [
   ['남원주차장', 50.8], ['번암교', 72.9], ['지리산휴', 75.4], ['옥계1교', 86.2],
@@ -844,7 +825,7 @@ function renderMiniMap() {
   const fullPoly = ROUTE12_POLYLINE_KM.map(([, la, lo]) => project(la, lo).join(',')).join(' ');
   const goryeongPoly = ROUTE12_POLYLINE_KM.filter(([km]) => km >= 92.8).map(([, la, lo]) => project(la, lo).join(',')).join(' ');
 
-  let svg = `<svg viewBox="0 0 ${W} ${H}" xmlns="http://www.w3.org/2000/svg" role="img" aria-label="고속국도 제12호선 광주대구선 실시간 노면·기상 미니맵">
+  let svg = `<svg viewBox="0 0 ${W} ${H}" xmlns="http://www.w3.org/2000/svg" role="group" aria-label="고속국도 제12호선 광주대구선 실시간 노면·기상 미니맵">
     <defs>
       <radialGradient id="mmBgGlow" cx="54%" cy="54%" r="62%">
         <stop offset="0%" stop-color="#175159" stop-opacity="0.72"/>
@@ -945,7 +926,7 @@ function renderMiniMap() {
         : 'rgba(148, 226, 213, 0.28)';
     const subCol = sev.rank >= 3 ? '#fecaca' : sev.rank === 2 ? '#fed7aa' : '#9edbd0';
 
-    svg += `<g class="map-node" data-coord="${escHtml(coord(p))}" style="cursor:pointer">
+    svg += `<g class="map-node" role="button" tabindex="0" aria-label="${escHtml(p.name)} 영상 선택" data-coord="${escHtml(coord(p))}" style="cursor:pointer">
       <line x1="${px}" y1="${py}" x2="${slot.cx}" y2="${slot.anchorY}" stroke="${fillCol}" stroke-width="1.1" opacity="0.7"/>
       <circle cx="${slot.cx}" cy="${slot.anchorY}" r="2.1" fill="${fillCol}" opacity="0.9"/>
       <circle class="${sev.rank >= 2 || isPlaceSelected ? 'mm-pin-pulse' : ''}" cx="${px}" cy="${py}" r="${isPlaceSelected ? 12.5 : 10}" fill="${ringCol}"/>
@@ -985,7 +966,7 @@ function renderMiniMap() {
     const dotCol = classifyStnCol(stn);
     const isSel = selectedWindyKey === `stn:${stn.stnId}`;
     svg += `<g class="stn-dot" data-stnid="${escHtml(stn.stnId)}" role="button" tabindex="0" transform="translate(${sx},${sy})" style="cursor:pointer">
-      <title>[도로기상 ${escHtml(kmTxt)}] ${escHtml(stn.name)} (${escHtml(stn.stationType)}, 고도 ${escHtml(stn.elevation ?? '—')}m) ${escHtml(trTxt)}${escHtml(riskTxt)} · 클릭 시 위성·레이더 이동</title>
+      <title>[도로기상 ${escHtml(kmTxt)}] ${escHtml(stn.name)} (${escHtml(stn.stationType)}, 고도 ${escHtml(stn.elevation ?? '—')}m) ${escHtml(trTxt)}${escHtml(riskTxt)} · 윈디 또는 CCTV 선택</title>
       <circle cx="0" cy="0" r="10.5" fill="transparent"/>
       ${isSel ? '<circle cx="0" cy="0" r="9.5" fill="rgba(56,189,248,0.28)" stroke="#38bdf8" stroke-width="1.3"/>' : ''}
       <circle class="stn-marker-core" cx="0" cy="0" r="4.3" fill="${dotCol}" stroke="#041418" stroke-width="1.4"/>
@@ -995,39 +976,21 @@ function renderMiniMap() {
   svg += `</svg>`;
   container.innerHTML = svg;
 
-  container.querySelectorAll('.map-node').forEach(node => {
-    node.addEventListener('click', () => {
-      const target = places.find(p => coord(p) === node.dataset.coord);
-      if (!target) return;
-      focusWindyOnPlace(target);
-    });
-    node.addEventListener('dblclick', () => {
-      const target = places.find(p => coord(p) === node.dataset.coord);
-      if (target) location.hash = detailURL(target);
-    });
-  });
-
-  container.querySelectorAll('.stn-dot').forEach(node => {
-    const activateStn = () => {
-      const target = corridorStns.find(s => String(s.stnId) === String(node.dataset.stnid));
-      if (!target) return;
-      focusWindyOnStation(target);
+  container.querySelectorAll('.map-node, .stn-dot').forEach(node => {
+    const activate = () => {
+      const target = node.dataset.coord
+        ? places.find(p => coord(p) === node.dataset.coord)
+        : corridorStns.find(s => String(s.stnId) === node.dataset.stnid);
+      if (target) openMapChoices(target, node);
     };
-    node.addEventListener('click', e => {
-      e.stopPropagation();
-      activateStn();
-    });
-    node.addEventListener('keydown', e => {
-      if (e.key === 'Enter' || e.key === ' ') {
-        e.preventDefault();
-        activateStn();
+    node.setAttribute('aria-haspopup', 'dialog');
+    node.onclick = activate;
+    node.onkeydown = event => {
+      if (event.key === 'Enter' || event.key === ' ') {
+        event.preventDefault();
+        activate();
       }
-    });
-    node.addEventListener('dblclick', () => {
-      const stn = corridorStns.find(s => String(s.stnId) === String(node.dataset.stnid));
-      const nearest = stn ? findNearestPlace(stn.lat, stn.lon) : null;
-      if (nearest) location.hash = detailURL(nearest);
-    });
+    };
   });
 
   const riskSummaryEl = $('corridorRiskSummary');
@@ -1095,7 +1058,8 @@ function renderMiniMap() {
         }
         chip.append(riskRow);
       }
-      chip.onclick = () => focusWindyOnStation(s);
+      chip.setAttribute('aria-haspopup', 'dialog');
+      chip.onclick = () => openMapChoices(s, chip);
       strip.append(chip);
     }
   }
@@ -1116,42 +1080,86 @@ function focusVisualPaneIntoView() {
   const outOfView = vRect.top < 62 || vRect.bottom > window.innerHeight - 12;
   if (minimapAbove || outOfView) {
     const targetY = Math.max(0, window.scrollY + vRect.top - 66);
-    window.scrollTo({ top: targetY, behavior: 'smooth' });
+    window.scrollTo({ top: targetY, behavior: matchMedia('(prefers-reduced-motion: reduce)').matches ? 'instant' : 'smooth' });
   }
 }
 
-function syncMiniMapSelectionUI() {
-  document.querySelectorAll('#roadStnStrip .road-stn-chip').forEach(btn => {
-    btn.classList.toggle('is-selected', selectedWindyKey === `stn:${btn.dataset.stnid}`);
-  });
+let releaseCctv;
+let mapSelection;
+let visualTarget;
+
+function openMapChoices(target, trigger) {
+  const station = target.stnId != null;
+  mapSelection = { target, trigger };
+  $('mapChoiceType').textContent = station ? '도로관측소 · 영상 선택' : '관심 구간 · 영상 선택';
+  $('mapChoicePlace').textContent = target.name;
+  const detail = station ? findNearestPlace(target.lat, target.lon) : target;
+  $('mapChoiceDetail').hidden = !detail;
+  if (detail) {
+    $('mapChoiceDetail').href = detailURL(detail);
+    $('mapChoiceDetail').textContent = station ? detail.name + ' 상세 보기 →' : '지역 상세 보기 →';
+  }
+  $('mapChoices').hidden = false;
+  $('chooseWindy').focus({ preventScroll: true });
+  const box = $('mapChoices').getBoundingClientRect();
+  if (box.top < 58 || box.bottom > innerHeight) {
+    $('mapChoices').scrollIntoView({ block: 'center' });
+  }
 }
 
-function focusWindyOnStation(s) {
-  const kmVal = resolveStationKm(s);
-  const kmTag = kmVal !== null ? `${kmVal.toFixed(1)}k ` : '';
-  selectedWindyKey = `stn:${s.stnId}`;
-  windyState.lat = Number((s.lat - 0.03).toFixed(3));
-  windyState.lon = Number(s.lon.toFixed(3));
-  windyState.detailLat = Number(s.lat.toFixed(3));
-  windyState.detailLon = Number(s.lon.toFixed(3));
-  windyState.label = `${kmTag}${s.name} (${s.lat.toFixed(3)}, ${s.lon.toFixed(3)})`;
-  updateWindyIframe();
-  renderMiniMap();
-  syncMiniMapSelectionUI();
-  focusVisualPaneIntoView();
+function closeMapChoices(restoreFocus = false) {
+  if (!mapSelection) return;
+  const { trigger } = mapSelection;
+  mapSelection = null;
+  $('mapChoices').hidden = true;
+  if (restoreFocus) {
+    const selector = trigger.dataset.coord
+      ? '.map-node[data-coord="' + CSS.escape(trigger.dataset.coord) + '"]'
+      : (trigger.matches('button') ? '.road-stn-chip' : '.stn-dot') + '[data-stnid="' + CSS.escape(trigger.dataset.stnid) + '"]';
+    document.querySelector(selector)?.focus({ preventScroll: true });
+  }
 }
 
-function focusWindyOnPlace(p) {
-  selectedWindyKey = `place:${coord(p)}`;
-  windyState.lat = Number((p.lat - 0.03).toFixed(3));
-  windyState.lon = Number(p.lon.toFixed(3));
-  windyState.detailLat = Number(p.lat.toFixed(3));
-  windyState.detailLon = Number(p.lon.toFixed(3));
-  windyState.label = `${p.name} · ${p.site || ''} (${p.lat.toFixed(3)}, ${p.lon.toFixed(3)})`;
-  updateWindyIframe();
-  renderMiniMap();
-  syncMiniMapSelectionUI();
+$('closeMapChoices').onclick = () => closeMapChoices(true);
+document.addEventListener('pointerdown', event => {
+  if (mapSelection && !event.target.closest('.map-choice-card')) closeMapChoices(true);
+});
+$('mapChoices').addEventListener('keydown', event => {
+  if (event.key === 'Escape') {
+    event.preventDefault();
+    closeMapChoices(true);
+  }
+});
+$('mapChoices').addEventListener('focusout', event => {
+  if (event.relatedTarget && !$('mapChoices').contains(event.relatedTarget)) closeMapChoices();
+});
+function openMapVideo(tabId) {
+  visualTarget = mapSelection.target;
+  closeMapChoices();
+  $('tabCctv').hidden = false;
+  $(tabId).click();
+  $(tabId).focus({ preventScroll: true });
   focusVisualPaneIntoView();
+}
+$('chooseWindy').onclick = () => openMapVideo('tabWindy');
+$('chooseCctv').onclick = () => openMapVideo('tabCctv');
+
+function cctvQuery(place) {
+  if (place.stnId != null) return new URLSearchParams({ site: place.stnId });
+  const preset = presets.find(p => coord(p) === coord(place));
+  return new URLSearchParams(preset ? { site: preset.cctvSite } : { lat: place.lat, lon: place.lon });
+}
+
+function focusWindyOnTarget(target) {
+  const km = target.stnId != null ? resolveStationKm(target) : null;
+  const kmTag = km != null ? km.toFixed(1) + 'k ' : '';
+  const site = target.site ? ' · ' + target.site : '';
+  windyState.lat = Number((target.lat - 0.03).toFixed(3));
+  windyState.lon = Number(target.lon.toFixed(3));
+  windyState.detailLat = Number(target.lat.toFixed(3));
+  windyState.detailLon = Number(target.lon.toFixed(3));
+  windyState.label = kmTag + target.name + site + ' (' + target.lat.toFixed(3) + ', ' + target.lon.toFixed(3) + ')';
+  updateWindyIframe();
 }
 
 function updateWindyIframe() {
@@ -1352,7 +1360,9 @@ function resolveDecisionCardsForPlace(place, rec, nowMs = Date.now()) {
     : Number.isFinite(obs?.roadTemp)
       ? obs.roadTemp
       : (Number.isFinite(ice?.bridgeTemp) ? ice.bridgeTemp : null);
-  const surfaceWet = ice?.curSurfaceWet ?? Boolean((obs?.surfaceCode >= 2 && obs?.surfaceCode <= 6) || (rec?.w?.current?.precip > 0));
+  const surfaceWet = Number.isFinite(obs?.surfaceCode)
+    ? [2, 3, 6].includes(obs.surfaceCode)
+    : ice?.curSurfaceWet ?? (rec?.w?.current?.precip > 0);
   const surfaceState = obs?.surfaceState || ice?.curSurfaceState || (surfaceWet ? '습윤' : '건조');
 
   return baseCards.map(card => {
@@ -1504,7 +1514,7 @@ export function board() {
   };
 
   const isMob = window.innerWidth <= 1024;
-  const mapJumpBtn = el('button', isMob ? '🗺️ 노선 미니맵 · Windy (별도화면)' : '🗺️ 노선 미니맵 · Windy', 'grp-map');
+  const mapJumpBtn = el('button', isMob ? '🗺️ 노선 미니맵 · 영상' : '🗺️ 노선 미니맵 · 영상', 'grp-map');
   mapJumpBtn.type = 'button';
   mapJumpBtn.setAttribute('aria-pressed', String(mobileMapView));
   mapJumpBtn.onclick = () => {
@@ -1771,6 +1781,7 @@ function renderDetail() {
   const r = getEffectiveRecord(p);
   const w = r.w, o = r.o, wrn = r.wrn;
 
+  $('nearbyCctv').href = './cctv.html?' + cctvQuery(p);
   const temp = o?.temp ?? w?.current?.temp;
   const hum = o?.humidity ?? w?.current?.humidity;
   const wind = o?.windSpeed ?? w?.current?.wind;
@@ -2139,7 +2150,7 @@ function renderDetail() {
       );
       const desc = el(
         'p',
-        '살포 시각을 입력하면 해당 카드가 재살포 카드로 전환되며, 3시간 경과 후 노면 습윤 + 대기·노면 ≤4°C 시 재살포를 지시합니다.',
+        '살포 시각을 입력하면 해당 카드가 재살포 카드로 전환되며, 3시간 경과 후 노면이 젖어 있고 대기 또는 노면 온도가 4°C 이하일 때 재살포를 지시합니다.',
         'spread-editor-desc'
       );
 
@@ -2208,8 +2219,8 @@ function renderDetail() {
       recentlyCleared: wrnClearState.recentlyCleared,
       clearedTitles: wrnClearState.clearedTitles,
       hasActiveSnowWrn: wrnClearState.hasActiveSnowWrn,
-      ice: w?.ice,
-      roadRisk: r?.roadRisk,
+      ice: wrn?.confirmed && !w?.stale && !o?._fromSnapshot ? w?.ice : null,
+      roadRisk: roadRiskData?._fromSnapshot ? null : r?.roadRisk,
       resolvedCards
     });
     if (returnDir) {
@@ -2315,7 +2326,7 @@ async function pollWarnings(force = false) {
           const wrn = batch.resultsByKey.get(coord(p));
           if (wrn) {
             record(p).wrn = wrn;
-            syncSnowWarningHistory(p, wrn);
+            if (batch.ok && !batch.stale && wrn.confirmed) syncSnowWarningHistory(p, wrn);
           }
         }
       }
@@ -2510,7 +2521,8 @@ export async function refresh(forceOrOpts = false) {
           if (entry.forecast?.ok) seedKmaForecast(p, entry.forecast);
           if (Array.isArray(entry.warnings)) {
             r.wrn = buildWarningsFromApi(entry.warnings);
-            syncSnowWarningHistory(p, r.wrn);
+            r.wrn.confirmed = entry.warningsConfirmed === true;
+            if (r.wrn.confirmed) syncSnowWarningHistory(p, r.wrn);
             r.checked = Date.now();
           }
           bundledKeys.add(coord(p));
@@ -2646,6 +2658,8 @@ export async function refresh(forceOrOpts = false) {
 }
 
 function route() {
+  closeMapChoices();
+  if (releaseCctv) $('tabWindy').click();
   const hash = location.hash;
   const m = hash.match(/^#region\/([^/]+)\/([\d.]+),([\d.]+)$/);
   detailPlace = null;
@@ -2665,7 +2679,7 @@ function route() {
   $('detail').hidden = !detailPlace;
   $('overview').hidden = !!detailPlace;
 
-  document.title = (detailPlace ? `${detailPlace.name} 상세 브리핑` : mobileMapView ? '광주대구선 노선 미니맵·Windy' : '관심지역 상시 기상 모니터') + ' | 날씨봇 × 비온다?';
+  document.title = (detailPlace ? `${detailPlace.name} 상세 브리핑` : mobileMapView ? '광주대구선 노선 미니맵 · 영상' : '관심지역 상시 기상 모니터') + ' | 날씨봇 × 비온다?';
   if (detailPlace) {
     const select = $('jump');
     select.replaceChildren(
@@ -2824,9 +2838,7 @@ function bindSplitterDrag() {
   let dragState = null; // { mode: 'col'|'row', startY, startRadarH }
   const startDrag = clientY => {
     const isRow = settings.pcLayout === 'split' && window.innerWidth > 1024;
-    const radarEl = $('windyBox')?.hidden
-      ? $('kmaRadarContainer')
-      : $('windyBox')?.querySelector('.iframe-wrap');
+    const radarEl = workspace.querySelector('#mapCctv:not([hidden]) video, #kmaRadarBox:not([hidden]) .kma-radar-container, #windyBox:not([hidden]) .iframe-wrap');
     dragState = {
       mode: isRow ? 'row' : 'col',
       startY: clientY,
@@ -3012,23 +3024,26 @@ $('toastDetailBtn').onclick = () => {
 };
 
 // Windy / KMA HSR Radar 탭 전환 및 레이어 컨트롤
-$('tabWindy').onclick = () => {
-  $('tabWindy').classList.add('active');
-  $('tabWindy').setAttribute('aria-selected', 'true');
-  $('tabKmaRadar').classList.remove('active');
-  $('tabKmaRadar').setAttribute('aria-selected', 'false');
-  $('windyBox').hidden = false;
-  $('kmaRadarBox').hidden = true;
-};
-$('tabKmaRadar').onclick = () => {
-  $('tabKmaRadar').classList.add('active');
-  $('tabKmaRadar').setAttribute('aria-selected', 'true');
-  $('tabWindy').classList.remove('active');
-  $('tabWindy').setAttribute('aria-selected', 'false');
-  $('windyBox').hidden = true;
-  $('kmaRadarBox').hidden = false;
-  loadKmaRadarImage(false);
-};
+const visualTabs = { tabWindy: 'windyBox', tabKmaRadar: 'kmaRadarBox', tabCctv: 'mapCctv' };
+for (const [tabId, panelId] of Object.entries(visualTabs)) {
+  $(tabId).onclick = () => {
+    releaseCctv?.();
+    releaseCctv = null;
+    for (const [id, panel] of Object.entries(visualTabs)) {
+      const active = id === tabId;
+      $(id).classList.toggle('active', active);
+      $(id).setAttribute('aria-selected', String(active));
+      $(panel).hidden = !active;
+    }
+    if (visualTarget && tabId !== 'tabKmaRadar') {
+      selectedWindyKey = visualTarget.stnId != null ? 'stn:' + visualTarget.stnId : 'place:' + coord(visualTarget);
+      renderMiniMap();
+      if (tabId === 'tabWindy') focusWindyOnTarget(visualTarget);
+      else releaseCctv = mountCctv($(panelId), cctvQuery(visualTarget));
+    }
+    if (tabId === 'tabKmaRadar') loadKmaRadarImage(false);
+  };
+}
 $('radarRefreshBtn').onclick = () => loadKmaRadarImage(true);
 
 document.querySelectorAll('.wc-btn[data-overlay]').forEach(btn => {
