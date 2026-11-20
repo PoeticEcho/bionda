@@ -8,7 +8,7 @@
 
 | 경로 / 페이지 | 주요 역할 | 비고 |
 | :--- | :--- | :--- |
-| `/` (`public/index.html`, `app.js`) | **도로기상 상황판** (메인) | 최대 8개 관심지역 · 모바일 2×4 무스크롤 · PC 상하(4×2)/좌우 FHD 분할 · 미니맵 · Windy/HSR 레이더 · 1080×1080 JPG 공유 |
+| `/` (`public/index.html`, `app.js`) | **도로기상 상황판** (메인) | 최대 8개 관심지역 · 모바일 2×4 무스크롤 · PC 상하(4×2)/좌우 FHD 분할 · 미니맵 · Windy/HSR 레이더 · 공용 PNG 미리보기·저장·공유 |
 | `/hourly` (`public/hourly.html`, `hourly.js`) | **1시간 단기예보 비교 상황판** | 고령지사 관내·연계 13개 읍면동 × 6h/12h(FHD 1화면)/24h/내일까지 · 강수/영하/겹침 KPI 강조 · KMA 원본형 상세표 |
 | `/hero-preview` (`public/hero-preview.html`) | **상세 배너 동적 연출 검수 시안** | 주야간·9종 날씨·음력 달령·구름 투과·살얼음/한파 시뮬레이터 (운영 `index.html` 미연동 독립 검수용) |
 | `/api/*` (`functions/api/[[path]].js`) | **Cloudflare Pages Functions 게이트웨이** | Service Binding(`env.API_WORKER`)으로 Worker `bionda`에 0ms 내부 RPC 전달 → 사내망 `*.workers.dev` TLS 차단 회피 |
@@ -149,3 +149,11 @@ npm test
 # 4. 정적 폴백 스냅샷 재생성
 npm run snapshot
 ```
+
+## 아침·저녁 공유 PNG
+
+봇은 한국시간 아침에 [morning.png](https://bionda.pages.dev/share/morning.png), 저녁에 [night.png](https://bionda.pages.dev/share/night.png)를 받습니다. 각각 8개 관심지역의 도로 현황과 13개 지역의 12시간 예보를 한 장에 담습니다. 파일에는 조회 시각과 기상청 발표 시각이 표시됩니다. 같은 회차를 반복 확인할 때는 응답의 ETag로 조건부 GET을 사용할 수 있습니다.
+
+GitHub Actions가 매일 08:00과 18:00 KST에 생성을 예약합니다. 오전에는 당일 08시 단기예보, 저녁에는 17시 단기예보 발표를 확인합니다. 자료가 지연되면 예보 조회를 3분 간격으로 재시도하고, 생성에 실패하면 직전 파일을 유지합니다. 예약 실행과 Pages 배포에는 지연이 생길 수 있습니다. 워크플로 이름은 `Publish road weather PNG`이며 수동 실행도 가능합니다. 이미지 커밋에는 저장소의 Actions 쓰기 권한이 필요합니다.
+
+대시보드·개별 지점·시간별예보 페이지의 공유 버튼은 현재 열린 자료로 브라우저에서 PNG를 만듭니다. 개별 지점 이미지는 요청한 브라우저에서만 생성합니다.

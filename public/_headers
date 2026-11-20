@@ -3,4 +3,7 @@
   Referrer-Policy: no-referrer-when-downgrade
   X-Frame-Options: SAMEORIGIN
   Permissions-Policy: camera=(), microphone=(), geolocation=(self)
-  Content-Security-Policy: default-src 'self'; img-src 'self' data: blob: https://*.weather.go.kr https://bionda.pages.dev https://poeticecho.github.io; style-src 'self' 'unsafe-inline'; script-src 'self'; worker-src 'self' blob:; media-src 'self' blob: https: http:; connect-src 'self' https:; frame-src https://embed.windy.com https://*.windy.com https://www.roadplus.co.kr https://*.roadplus.co.kr; base-uri 'self'; form-action 'self'; frame-ancestors 'none'
+  Content-Security-Policy: default-src 'self'; img-src 'self' blob: data: blob: https://*.weather.go.kr https://bionda.pages.dev https://poeticecho.github.io; style-src 'self' 'unsafe-inline'; script-src 'self'; worker-src 'self' blob:; media-src 'self' blob: https: http:; connect-src 'self' https:; frame-src https://embed.windy.com https://*.windy.com https://www.roadplus.co.kr https://*.roadplus.co.kr; base-uri 'self'; form-action 'self'; frame-ancestors 'none'
+
+/share/*
+  Cache-Control: public, max-age=300, s-maxage=900, stale-while-revalidate=60
