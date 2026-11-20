@@ -10,6 +10,7 @@ on:
       - 'lib/cctv-pages.mjs'
       - 'cloudflare/worker.js'
       - 'public/cctv-player.js'
+      - 'public/cctv-request.js'
 permissions:
   contents: read
 jobs:
@@ -36,7 +37,7 @@ jobs:
               const entries = cameraDirectory(data);
               const site = data.sites?.find(s => s.id === 'hapcheon-seobuk');
               if (!site || !entries.some(e => e.record?.name === '야로대교1')) throw Error('야로대교1 or Hapcheon site missing');
-              console.log(`CCTV ${data.count}, corridor ${entries.length}, cache ${data.cache}`);
+              console.log(`::notice::CCTV ${data.count}, corridor ${entries.length}, 야로대교1 · ${data.cache}`);
               break;
             } catch (err) {
               if (attempt === 4) { console.log('::error::' + err.message); process.exitCode = 1; }

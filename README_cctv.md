@@ -47,6 +47,8 @@ curl -s "https://bionda.pages.dev/api/cctv?refresh=1" | head -5
 
 ---
 
+Pages는 연결된 Worker가 서버 오류를 반환하면 Pages에 설정된 CCTV 원본으로 다시 조회합니다. 원본 조회가 실패할 때는 같은 엣지에 보관한 최근 30분 이내 목록을 사용할 수 있습니다. 이때 응답은 `X-Cache: STALE`과 원래 수신 시각을 표시합니다. 처음 목록을 여는 뷰어는 502·503·504 응답을 최대 두 번 재시도합니다.
+
 ## 2. 대시보드 사용
 
 - Cloudflare Pages: `https://bionda.pages.dev/cctv-preview` (기본 주소 `/api/cctv` 자동 연결)
