@@ -8,6 +8,7 @@ const fsSync = require('node:fs');
 const path = require('node:path');
 const { URL } = require('node:url');
 const core = require('./lib/bionda-core');
+const { briefingStatus } = require('./lib/share-status');
 const {
   CCTV_CACHE_TTL_SECONDS,
   buildCctvPayload,
@@ -626,6 +627,7 @@ async function serve(req, res, pathname) {
 const server = http.createServer(async (req, res) => {
   res.setHeader('X-Content-Type-Options', 'nosniff');
   res.setHeader('Referrer-Policy', 'no-referrer-when-downgrade');
+  res.setHeader('Link', '<https://bionda.pages.dev/llms.txt>; rel="help"; type="text/plain", <https://bionda.pages.dev/share/status.json>; rel="alternate"; type="application/json"');
   res.setHeader('X-Frame-Options', 'SAMEORIGIN');
   res.setHeader('Permissions-Policy', 'camera=(), microphone=(), geolocation=(self)');
   res.setHeader(
@@ -644,6 +646,13 @@ const server = http.createServer(async (req, res) => {
   if (req.method !== 'GET' && req.method !== 'HEAD') return sendJson(res, 405, { error: '허용되지 않는 요청' });
   const requestUrl = new URL(req.url, 'http://localhost');
   const pathname = requestUrl.pathname;
+
+  if (pathname === '/share/status.json') {
+    const result = await briefingStatus(async slot =>
+      JSON.parse(await fs.readFile(path.join(__dirname, 'public/share', slot + '.json'), 'utf8')));
+    res.writeHead(result.status, Object.fromEntries(result.headers));
+    return res.end(req.method === 'HEAD' ? undefined : await result.text());
+  }
 
   if (pathname.startsWith('/api/') && !/\.(?:json|png|jpe?g|webp|svg|txt)$/i.test(pathname)) {
     applyApiCors(req, res);

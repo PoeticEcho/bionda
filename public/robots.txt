@@ -1,0 +1,4 @@
+# Briefing collection guide: https://bionda.pages.dev/llms.txt
+# Current edition and retry time: https://bionda.pages.dev/share/status.json
+User-agent: *
+Allow: /
