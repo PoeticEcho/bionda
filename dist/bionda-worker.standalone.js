@@ -218,19 +218,33 @@ function analyze(hourly, observed) {
   };
 }
 
+// Both the point forecast and comparison matrix use the same KMA release window.
+function forecastWindowStart(now) {
+  const start = baseUltra(now);
+  start.setUTCHours(start.getUTCHours() + 1, 0, 0, 0);
+  return start;
+}
+
+function forecastHour(near, far, start, index) {
+  const date = new Date(start.getTime() + index * 3600000);
+  const key = datePart(date) + timePart(date);
+  const ultra = index < 6 ? near.get(key) : null;
+  const short = far.get(key);
+  if (!ultra && !short) return null;
+  // POP and other fields absent from the ultra-short product come from the same short-term hour.
+  const values = { ...short, ...ultra, __source: ultra ? '초단기예보' : '단기예보' };
+  return { date, values: classify(values) };
+}
+
 function buildForecastResult(grid, now, requests) {
   const [ultra, short, actual] = requests.map(x => x.status === 'fulfilled' ? x.value : null);
   if (!ultra && !short) throw new Error('초단기·단기 예보를 모두 가져오지 못했습니다. 발급된 API 키의 승인 여부를 확인하세요.');
   const near = grouped(ultra?.items), far = grouped(short?.items);
-  const nowK = kst(now); nowK.setUTCMinutes(0, 0, 0);
+  const start = forecastWindowStart(now);
   const hourly = [];
-  for (let i = 1; i <= 12; i++) {
-    const d = new Date(nowK.getTime() + i * 3600000);
-    const key = datePart(d) + timePart(d);
-    const sourceNear = near.get(key), sourceFar = far.get(key);
-    const combined = { ...(sourceFar || {}), ...(sourceNear || {}), __source: sourceNear ? '초단기예보' : '단기예보' };
-    if (!sourceNear && !sourceFar) continue;
-    hourly.push({ time: isoKst(d), offset: i, ...classify(combined) });
+  for (let i = 0; i < 12; i++) {
+    const hour = forecastHour(near, far, start, i);
+    if (hour) hourly.push({ time: isoKst(hour.date), offset: i + 1, ...hour.values });
   }
   const observations = actual?.items || [];
   const values = {}; for (const o of observations) values[o.category] = o.obsrValue;
@@ -246,9 +260,10 @@ function buildForecastResult(grid, now, requests) {
   return {
     ok: true,
     grid,
-    updatedAt: new Date().toISOString(),
+    updatedAt: new Date(now).toISOString(),
     sources: { ultra: ultra?.base || null, short: short?.base || null, observed: actual?.base || null },
     notices: requests.filter(x => x.status === 'rejected').map(x => errMessage(x.reason)).slice(0, 3),
+    windowStart: isoKst(start),
     hours: hourly,
     analysis: analyze(hourly, observed)
   };
@@ -996,36 +1011,21 @@ function summarizeHourlyWindow(hours = []) {
 function buildShortTermRegionForecast({ region, now = Date.now(), shortRes = null, ultraRes = null, forceStartK = null }) {
   const near = grouped(ultraRes?.items);
   const far = grouped(shortRes?.items);
-  const nowK = kst(now);
-  nowK.setUTCMinutes(0, 0, 0);
-  const todayDayNum = nowK.getUTCDate();
-
-  // 초단기예보(+1h~+6h)가 이미 다음 정각(+1h)을 시작 시각으로 제공하면 기상청 단기예보 페이지처럼 그 시각부터 시작해
-  // 지나간 현재 정각의 구형 단기예보(02시 등)와 초단기예보 사이의 인위적 기온/하늘 단차를 방지한다.
-  const nextHourKey = datePart(new Date(nowK.getTime() + 3600000)) + timePart(new Date(nowK.getTime() + 3600000));
-  const nowHourKey = datePart(nowK) + timePart(nowK);
-  const startK = forceStartK instanceof Date
-    ? forceStartK
-    : (!near.has(nowHourKey) && near.has(nextHourKey))
-      ? new Date(nowK.getTime() + 3600000)
-      : nowK;
+  const todayDayNum = kst(now).getUTCDate();
+  const startK = forceStartK ?? forecastWindowStart(now);
 
   // 시작 시각 ~ 내일 23:00 KST 범위 (최소 24시간, 최대 48시간)
   const targetHours = Math.max(24, Math.min(48, (24 - startK.getUTCHours()) + 24));
   const hours = [];
 
   for (let i = 0; i < targetHours; i++) {
-    const d = new Date(startK.getTime() + i * 3600000);
-    const key = datePart(d) + timePart(d);
-    const sourceNear = near.get(key);
-    const sourceFar = far.get(key);
-    if (!sourceNear && !sourceFar) continue;
-    const combined = { ...(sourceFar || {}), ...(sourceNear || {}), __source: sourceNear ? '초단기+단기' : '단기예보' };
-    const c = classify(combined);
+    const hour = forecastHour(near, far, startK, i);
+    if (!hour) continue;
+    const { date: d, values: c } = hour;
     const hKst = d.getUTCHours();
     const dNum = d.getUTCDate();
     hours.push({
-      offset: hours.length,
+      offset: i,
       time: isoKst(d),
       dateLabel: `${pad(d.getUTCMonth() + 1)}-${pad(dNum)}`,
       dayNum: dNum,
@@ -1054,6 +1054,7 @@ function buildShortTermRegionForecast({ region, now = Date.now(), shortRes = nul
 
   return {
     id: region.id,
+    windowStart: isoKst(startK),
     admin: region.admin,
     county: region.county,
     name: region.name,
@@ -1069,9 +1070,9 @@ function buildShortTermRegionForecast({ region, now = Date.now(), shortRes = nul
     },
     hours,
     summaries: {
-      h6: summarizeHourlyWindow(hours.slice(0, 6)),
-      h12: summarizeHourlyWindow(hours.slice(0, 12)),
-      h24: summarizeHourlyWindow(hours.slice(0, 24)),
+      h6: summarizeHourlyWindow(hours.filter(h => h.offset < 6)),
+      h12: summarizeHourlyWindow(hours.filter(h => h.offset < 12)),
+      h24: summarizeHourlyWindow(hours.filter(h => h.offset < 24)),
       tomorrow: summarizeHourlyWindow(hours)
     }
   };
@@ -1201,18 +1202,7 @@ async function collectShortTerm12({ now = Date.now(), fetchShort, fetchUltra }) 
     );
   }
 
-  // 다른 격자들 중 하나라도 +1h 초단기 예보가 시작되어 있다면 전체 지역의 기준 시작 시각을 동일하게 맞춰 1시간 열 어긋남 방지
-  const nowK = kst(now);
-  nowK.setUTCMinutes(0, 0, 0);
-  const nextHourKey = datePart(new Date(nowK.getTime() + 3600000)) + timePart(new Date(nowK.getTime() + 3600000));
-  const nowHourKey = datePart(nowK) + timePart(nowK);
-  const useNextHourStart = [...gridData.values()].some(e => {
-    if (!e?.ultraRes?.items?.length) return false;
-    const n = grouped(e.ultraRes.items);
-    return !n.has(nowHourKey) && n.has(nextHourKey);
-  });
-  const uniformStartK = useNextHourStart ? new Date(nowK.getTime() + 3600000) : nowK;
-
+  const uniformStartK = forecastWindowStart(now);
   const results = SHORT_TERM_12_REGIONS.map((region) => {
     const gk = `${region.grid.nx},${region.grid.ny}`;
     const entry = gridData.get(gk) || { shortRes: null, ultraRes: null };

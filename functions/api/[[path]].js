@@ -1,3 +1,4 @@
+import { alignBoundForecast } from '../../lib/bound-forecast.mjs';
 import { servePagesCctv } from '../../lib/cctv-pages.mjs';
 import { getServiceKey } from '../../lib/bionda-core.js';
 import { completeBoundHourlyResponse } from '../../lib/hourly-roster.mjs';
@@ -18,17 +19,32 @@ export async function onRequest(context) {
       }
     } catch {}
   }
-  if (method === 'GET' && new URL(context.request.url).pathname === '/api/cctv') {
+  const url = new URL(context.request.url);
+  if (method === 'GET' && url.pathname === '/api/cctv') {
     return servePagesCctv(context);
   }
   if (context.env?.API_WORKER && typeof context.env.API_WORKER.fetch === 'function') {
     const service = context.env.API_WORKER;
-    if (method === 'GET' && new URL(context.request.url).pathname === '/api/short-term-12') {
-      if (getServiceKey(context.env)) {
-        const local = await worker.fetch(context.request, context.env, { waitUntil: p => context.waitUntil(p) });
-        if (local.ok) return completeBoundHourlyResponse(local, context.request, service);
+    const comparison = url.pathname === '/api/short-term-12';
+    const bundle = url.pathname === '/api/overview-bundle';
+    if (method === 'GET' && (comparison || bundle || url.pathname === '/api/forecast')) {
+      async function loadComparison(request) {
+        if (getServiceKey(context.env)) {
+          const local = await worker.fetch(request, context.env, context);
+          if (local.ok) return completeBoundHourlyResponse(local, request, service);
+        }
+        return completeBoundHourlyResponse(await service.fetch(request), request, service);
       }
-      return completeBoundHourlyResponse(await service.fetch(context.request), context.request, service);
+      if (comparison) return loadComparison(context.request);
+      if (getServiceKey(context.env) && (!bundle || context.env.KMA_ROAD_KEY)) {
+        const local = await worker.fetch(context.request, context.env, context);
+        if (local.ok) return local;
+      }
+      const upstream = await service.fetch(context.request);
+      return alignBoundForecast(upstream, bundle, () => {
+        const target = new URL('/api/short-term-12?roster=13', url);
+        return loadComparison(new Request(target, { headers: context.request.headers }));
+      });
     }
     return service.fetch(context.request);
   }

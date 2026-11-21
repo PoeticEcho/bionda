@@ -3,7 +3,8 @@ const assert=require('node:assert/strict');
 process.env.KMA_SERVICE_KEY='dummy-do-not-expose';
 const {forecast,getObservationForPlace,server}=require('../server');
 const pad=x=>String(x).padStart(2,'0');
-const nowKst=new Date(Date.now()+9*3600000);nowKst.setUTCMinutes(0,0,0);
+const { forecastWindowStart } = require('../lib/bionda-core');
+const windowStart = forecastWindowStart(Date.now());
 function item(date,i,category,fcstValue){return {fcstDate:`${date.getUTCFullYear()}${pad(date.getUTCMonth()+1)}${pad(date.getUTCDate())}`,fcstTime:`${pad(date.getUTCHours())}00`,category,fcstValue};}
 function contentFor(resource){
   const items=[];
@@ -11,7 +12,7 @@ function contentFor(resource){
     return [{category:'PTY',obsrValue:'0'},{category:'RN1',obsrValue:'0'},{category:'T1H',obsrValue:'15'}];
   }
   for(let i=1;i<= (resource==='getUltraSrtFcst'?6:12);i++){
-    const date=new Date(nowKst.getTime()+i*3600000);
+    const date=new Date(windowStart.getTime()+(i-1)*3600000);
     items.push(item(date,i,'PTY',i>=2&&i<=4?'1':'0'));
     items.push(item(date,i,'POP',i>=2&&i<=4?'80':'20'));
     items.push(item(date,i,resource==='getUltraSrtFcst'?'RN1':'PCP',i>=2&&i<=4?'1mm':'강수없음'));
