@@ -1,14 +1,14 @@
-// Forecast hours are in KST. The six-hour tail is a planning window for residual
+// Forecast hours are in KST. The overnight tail is a planning window for residual
 // moisture after rain, not a measured drying time or an official warning rule.
 const HOUR = 3600000;
-const TAIL = 6 * HOUR;
+const TAIL = 12 * HOUR;
 const DAY = 24 * HOUR;
 const kst = ms => new Date(ms + 9 * HOUR).toISOString().slice(0, 16);
 const stamp = ms => kst(ms).slice(5).replace('T', ' ');
 function phase(h) {
   if (['어는비','어는 비','어는 이슬비'].includes(h.type)) return 'freezingRain';
-  if (h.snowCm > 0 || ['2','3','6','7'].includes(String(h.pty))) return 'snow';
-  if (h.wet === true || h.rainMm > 0 || ['1','4','5'].includes(String(h.pty))) return 'rain';
+  if (['눈','진눈깨비','비/눈','눈날림','빗방울/눈날림'].includes(h.type) || h.snowCm > 0 || ['2','3','6','7'].includes(String(h.pty))) return 'snow';
+  if (['비','빗방울','소나기'].includes(h.type) || h.wet === true || h.rainMm > 0 || ['1','4','5'].includes(String(h.pty))) return 'rain';
   if (h.wet === false || String(h.pty) === '0') return 'clear';
   return 'unknown';
 }
@@ -81,4 +81,46 @@ function timingAdvice(mode) {
     case 'freezingRain': return '어는비 예보가 있으므로 결빙 예상 구간과 공식 위험정보를 즉시 확인하고 예비살포 기준을 적용하세요.';
     default: return '강우 중에는 제설제가 씻겨갈 수 있습니다. 비가 그친 뒤 잔습과 기온 하강 전망을 확인하세요.';
   }
+}
+
+// One entry describes a decision interval. Forecast snow does not measure lane accumulation.
+function spreadingHints(hours, time) {
+  const floor=Math.floor(time/HOUR)*HOUR, result=[];
+  for(const w of snowWindows(hours,time,48)) {
+    const clock=t=>kst(t).slice(11);
+    if(w.mode==='rain') continue;
+    if(w.mode==='snow'){
+      if(w.start.ms>=floor) result.push({stage:'예비살포',at:w.at,last:w.at,
+        text:'눈·진눈깨비 시작 예보 '+clock(w.start.ms)+' · 현장에서 흩날리기 시작하면 예비살포 검토'});
+      result.push({stage:'본살포',at:w.at,last:w.end.ms,
+        text:'강설 예보 '+clock(w.start.ms)+'~'+clock(w.end.ms)+' · 차로에 눈이 쌓이면 본살포 검토. 노면 적설 3cm 미만은 염화물 살포, 3cm 이상은 적설 깊이에 따라 제설 작업을 병행합니다. (교육자료 12쪽)'});
+    } else if(w.mode==='candidate') {
+      result.push({stage:'예비살포',at:w.at,last:w.cool.ms-HOUR,until:w.cool.ms,
+        text:clock(w.end.ms)+' 마지막 비 → '+clock(w.cool.ms)+' 대기 '+temp(w.cool)+'℃. 비가 그치고 노면에 물기가 남으면 '+clock(w.at)+'부터 '+clock(w.cool.ms)+' 전까지 예비살포 검토.'+(w.cool.ms-w.end.ms>6*HOUR?' 강우 후 시간이 길어 실제 잔습 확인이 특히 중요합니다.':'')});
+      result.push({stage:'노면 확인',at:w.cool.ms,last:w.cool.ms,text:clock(w.cool.ms)+' 대기 '+temp(w.cool)+'℃ 예보 · 비가 그친 구간의 잔습과 실측 노면온도를 확인하세요.'});
+    } else {
+      result.push({stage:w.mode==='freezingRain'?'예비살포':'노면 확인',at:w.at,last:w.at,text:timingAdvice(w.mode)});
+    }
+  }
+  // Later cooling is a prompt to inspect. Residual water cannot be inferred hours later.
+  let rainAt=null,watchShown=false;
+  const sorted=[...hours].sort((a,b)=>Date.parse(a.time)-Date.parse(b.time));
+  let previous=null;
+  for(const h of sorted){
+    const at=Date.parse(h.time), kind=phase(h);
+    if(previous===null || at-previous!==HOUR || kind==='unknown'){rainAt=null;watchShown=false;}
+    previous=at;
+    if(kind!=='clear'){
+      rainAt=kind==='rain'?at:null;watchShown=false;continue;
+    }
+    const v=temp(h);
+    if(v===null){rainAt=null;continue;}
+    if(at<floor || watchShown || v>4)continue;
+    if(rainAt!==null && at-rainAt<=TAIL || v>0)continue;
+    if(!result.some(e=>e.at===at && e.stage==='노면 확인')){
+      result.push({stage:'노면 확인',at,last:at,text:'대기 '+v+'℃ 예보입니다. 앞선 강우나 노면 습윤을 확인할 자료가 부족하므로 노면 상태부터 확인하세요.'});
+    }
+    watchShown=true;
+  }
+  return result.sort((a,b)=>a.at-b.at);
 }

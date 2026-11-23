@@ -40,10 +40,10 @@ function legsFor(from,to,shape,near,facility,ramp) {
   const pairs=shape==='왕복' ? [...path,...path.map(([a,b])=>[b,a]).reverse()] : path;
   return pairs.map(([a,b])=>({s:Math.min(a,b),name:towns[a]+' → '+towns[b]}));
 }
-let demo=false, screen='shift', selected=null, refreshing=false, loadSeq=0, error='';
+let demo=false, screen='hours', selected=null, refreshing=false, loadSeq=0, error='';
 let observations=[], forecasts=[], precip=new Map(), forecastAt=NaN;
-let hints=null, hintUntil=0;
-const now=()=>demo?Date.parse(demoDay+'T'+$('clock').value+':00+09:00'):Date.now();
+let hints=null, hintUntil=0, picked='', quickTarget=null;
+const now=()=>demo?Date.parse(($('clock').value==='22:56'?'2026-11-23':demoDay)+'T'+$('clock').value+':00+09:00'):Date.now();
 const prefix='bionda:snow-helper:test:1:';
 let demoStore=new Map();
 function entries() {
@@ -151,6 +151,13 @@ function paintCards() {
     const ops=node('div',null,'actions');ops.append(button('운행 종료',()=>openAction(trip,0,'end')));card.append(ops);
     return {next,card};
   }).sort((a,b)=>a.next-b.next);
+  for(const r of latestGrid(records).filter(r=>!r.trip)){
+    const dueAt=r.at+THREE, c=node('article',null,'card'+(dueAt<=now()?' due':''));
+    c.append(node('h3',regions.get(r.area)?.name+' · '+r.label),node('p',stamp(r.at)+' 실제 '+r.stage),
+      node('strong',stamp(dueAt)+' 재살포 점검'),node('p','같은 구간의 노면이 계속 젖어 있고 실측 대기가 4℃ 이하인지 확인하세요.'));
+    cards.push({next:dueAt,card:c});
+  }
+  cards.sort((a,b)=>a.next-b.next);
   $('cards').replaceChildren(...(cards.length?cards.map(r=>r.card):[node('p','차량을 출발시키면 이곳에 점검 시각과 해당 구간의 기상이 표시됩니다.','empty')]));
 }
 function seedDemo() {
@@ -164,10 +171,32 @@ function demoWeather() {
   forecasts=sampleRows.map(r=>({...r,hours:r.temp.map((temp,i)=>({
     time:new Date(start+i*H).toISOString(),temp,wet:r.rain.includes(i),pty:r.rain.includes(i)?'1':'0',type:r.rain.includes(i)?'비':'없음'
   }))}));
+  // Reported 23:00–09:00 forecast. Later snowfall is a separate training scenario.
+  const night={
+    hamyang:[[8,8,8,7,7,6,4,4,3,3,4],['비','빗방울']],
+    jigok:[[7,7,7,7,6,5,4,3,2,2,3],['비','비']],
+    sudong:[[7,8,8,8,7,6,4,4,3,3,4],['비','빗방울']],
+    geochang:[[6,6,6,5,4,3,2,2,1,2,3],[]],
+    namsang:[[7,7,6,4,3,3,2,1,1,1,2],['비']],
+    namha:[[6,6,6,5,4,3,2,2,1,2,3],[]],
+    gajo:[[8,6,5,4,2,1,0,-1,-1,-1,0],[]],
+    gaya:[[7,6,6,4,3,2,0,-1,-1,0,0],[]],
+    yaro:[[8,7,7,5,5,3,2,1,0,1,2],['비']],
+    ssangnim:[[8,8,8,8,7,6,5,4,3,3,4],['비']],
+    daegaya:[[8,7,8,8,7,6,5,4,3,3,4],['비']],
+    seongsan:[[9,8,8,9,8,7,6,4,4,4,4],['비','빗방울']],
+    okpo:[[9,8,9,9,8,7,5,4,3,3,4],['비','빗방울']]
+  };
+  for(const r of forecasts){
+    const [temps,types]=night[r.id];
+    r.hours=r.hours.slice(8);
+    temps.forEach((v,i)=>Object.assign(r.hours[i],{temp:v,type:types[i]||'없음',wet:!!types[i],pty:types[i]==='빗방울'?'5':types[i]?'1':'0'}));
+  }
+  for(const h of forecasts.find(r=>r.id==='gaya').hours.slice(12,15)) Object.assign(h,{type:'눈',pty:'3',wet:true});
   observations=sections.flatMap((s,idx)=>s.stations.map(([stnId,name])=>({stnId,name,time:new Date(now()).toISOString(),
     temp:idx===0?5:3,roadTemp:idx===0?4:1,surfaceCode:idx===1?1:2,surfaceState:idx===1?'건조':'습윤'})));
   precip=new Map(sections.map(s=>[s.area,{type:'무강수',time:now()}]));
-  forecastAt=start-H/2;
+  forecastAt=Date.parse('2026-11-23T22:56:00+09:00');
 }
 async function api(path) {
   const r=await fetch(base+path,{signal:AbortSignal.timeout(10000)});
@@ -181,7 +210,7 @@ async function refresh() {
   const [fc,obs]=await Promise.allSettled([api('/api/short-term-12?roster=13'),api('/api/road-obs?line=14')]);
   if(seq!==loadSeq||demo)return;
   const issues=[];
-  if(fc.status==='fulfilled' && Array.isArray(fc.value.regions)){forecasts=fc.value.regions;forecastAt=readTime(fc.value.updatedAt);}
+  if(fc.status==='fulfilled' && Array.isArray(fc.value.regions)){forecasts=withPreviousHours(fc.value.regions);forecastAt=readTime(fc.value.updatedAt);}
   else issues.push('시간별예보');
   if(obs.status==='fulfilled'&&Array.isArray(obs.value.stations)) observations=obs.value.stations; else issues.push('노면관측');
   const current=await Promise.allSettled(areas.map(async id=>{
@@ -196,18 +225,91 @@ async function refresh() {
   for(const item of current) if(item.status==='fulfilled') precip.set(...item.value); else if(!issues.includes('강수 실황')) issues.push('강수 실황');
   error=issues.length?issues.join(' · ')+' 연결 지연 · 자료 시각을 확인하세요.':'';
   refreshing=false;
-  if(hints && hintInput()!==hints.input) clearHints();
+  if(hints && hintInput()!==hints.input) clearHints('예보가 바뀌었습니다. 힌트를 켜면 새 자료로 판단합니다.');
   paint();
 }
+// Retain past forecast slots across the hourly roll so overnight rain can still be traced.
+function withPreviousHours(rows) {
+  const key='bionda:snow-helper:forecast-history:1',floor=Math.floor(now()/H)*H;
+  let previous={};
+  try {previous=JSON.parse(localStorage.getItem(key))||{};} catch {}
+  const history={};
+  const result=rows.map(r=>{
+    const kept=new Map();
+    for(const h of (Array.isArray(previous[r.id])?previous[r.id]:[])){
+      const t=readTime(h.time);
+      if(t>=floor-12*H && t<=floor)kept.set(t,h);
+    }
+    for(const h of r.hours||[])kept.set(readTime(h.time),h);
+    const hours=[...kept.values()].sort((a,b)=>readTime(a.time)-readTime(b.time));
+    history[r.id]=hours.filter(h=>readTime(h.time)>=floor-12*H && readTime(h.time)<=floor+12*H);
+    return {...r,hours};
+  });
+  try{localStorage.setItem(key,JSON.stringify(history));}catch{}
+  return result;
+}
 function hintInput() {return JSON.stringify(forecasts.map(r=>[r.id,r.hours.map(h=>[h.time,h.temp,h.pty,h.wet,h.snowCm,h.rainMm,h.type])]));}
-function clearHints() {hints=null;hintUntil=0;$('hintReason').textContent='';}
+function clearHints(message='') {hints=null;hintUntil=0;$('hintReason').textContent=message;}
+function summary(start,end) {
+  const box=$('outlook');box.replaceChildren();
+  if(!hints){
+    box.append(node('p',forecasts.length?'제설 힌트를 켜면 비가 그친 뒤의 예비살포 시간대와 강설 시 본살포 검토 구간이 표시됩니다.':'시간별예보 수신 대기'));
+    return;
+  }
+  for(const stage of ['예비살포','본살포','노면 확인']){
+    const groups=new Map();
+    for(const r of forecasts) for(const item of hints.byId.get(r.id)||[]) {
+      if(item.stage!==stage || item.last<start || item.at>end)continue;
+      const key=item.at+'|'+item.last+'|'+(item.until||'');
+      if(!groups.has(key))groups.set(key,{item,rows:[]});
+      groups.get(key).rows.push(r);
+    }
+    if(!groups.size && stage==='노면 확인')continue;
+    const card=node('div',null,'outlook-card');card.append(node('strong',stage+(stage==='노면 확인'?'':' 검토')));
+    if(!groups.size) {
+      const available=forecasts.some(r=>r.hours.some(h=>readTime(h.time)>=start && readTime(h.time)<=end && phase(h)!=='unknown'));
+      card.append(node('p',!available?'해당 시간 예보 미수신 · 판단 보류':stage==='본살포'?'이 시간대에 강설·진눈깨비 근거 없음. 차로 적설을 확인하면 본살포를 판단하세요.':'이 시간대에 예비살포 후보를 뒷받침하는 예보가 없습니다.'));
+    }else{
+      for(const {item,rows} of [...groups.values()].sort((x,y)=>x.item.at-y.item.at)){
+        const text=stamp(item.at).slice(-5)+(item.until?'~'+stamp(item.until).slice(-5)+' 전':item.last>item.at?'~'+stamp(item.last).slice(-5):'')+' · '+rows.map(r=>r.name).join(', ');
+        const b=button(text,()=>{
+          const t=Math.max(start,item.at);
+          const cell=gridCell(rows[0].id,t);
+          if(cell){cell.scrollIntoView({block:'nearest',inline:'center'});cell.focus({preventScroll:true});}
+          explain(rows[0],item);
+        });
+        card.append(b);
+      }
+    }
+    box.append(card);
+  }
+}
+function gridCell(id,t){return $('matrix').querySelector('td[data-area="'+id+'"][data-at="'+t+'"]');}
+function explain(r,item){
+  $('detailHeading').textContent=r.county+' '+r.name+' · '+item.stage+' 검토';
+  $('detailText').textContent=item.text;
+  $('detail').showModal();
+}
+function latestGrid(records) {
+  const latest=new Map();
+  for(const r of records.filter(r=>r.type==='spread' && r.at<=now())){
+    const key=JSON.stringify([r.trip||r.area,r.leg??'',r.point]);
+    if(!latest.has(key)||latest.get(key).at<r.at)latest.set(key,r);
+  }
+  return [...latest.values()].filter(r=>r.area);
+}
 function paintHours() {
-  const start=Math.floor(now()/H)*H;
+  const floor=Math.floor(now()/H)*H;
+  const hasCurrent=forecasts.some(r=>r.hours.some(h=>readTime(h.time)===floor));
+  const start=(picked||showPast)?floor-6*H:hasCurrent?floor:floor+H;
   const tomorrowEnd=Date.parse(ktime(now()+24*H).slice(0,10)+'T23:00:00+09:00');
-  const end=$('range').value==='tomorrow'?tomorrowEnd:start+(Number($('range').value)-1)*H;
-  $('forecastSource').textContent=(demo?'모의 예보':'기상청 예보')+' · 자료 '+stamp(forecastAt)+(hints?' · 비온다 자체 힌트 '+stamp(now()+hintUntil-Date.now())+'까지':'');
-  $('hints').setAttribute('aria-pressed',String(!!hints));$('hints').textContent=hints?'제설 힌트 끄기':'제설 힌트 켜기';
-  if(!forecasts.length){$('matrix').textContent='시간별예보 수신 대기';return;}
+  const end=$('range').value==='tomorrow'?tomorrowEnd:((picked||showPast)?floor:start)+(Number($('range').value)-1)*H;
+  $('forecastSource').textContent=(demo?'모의 예보':'기상청 예보')+' · 자료 '+stamp(forecastAt)+(hints?' · 비온다 자체 판단 '+stamp(now()+hintUntil-Date.now())+'까지':'');
+  $('hints').setAttribute('aria-pressed',String(!!hints));$('hints').textContent=hints?'제설 힌트 끄기':'제설 힌트 켜기';$('hints').disabled=!forecasts.length;
+  $('history').setAttribute('aria-pressed',String(showPast));
+  summary(floor,end);
+  if(!forecasts.length){$('matrix').replaceChildren();return;}
+  const records=entries(),recent=latestGrid(records);
   const table=node('table'),header=table.createTHead().insertRow();
   header.append(node('th','지역'));
   for(let t=start;t<=end;t+=H) header.append(node('th',stamp(t)));
@@ -217,12 +319,23 @@ function paintHours() {
     const hours=new Map(r.hours.map(h=>[readTime(h.time),h]));
     for(let t=start;t<=end;t+=H){
       const cell=row.insertCell(),h=hours.get(t);
-      if(!h){cell.textContent='—';continue;}
-      if(h.wet)cell.classList.add('wet');if(Number.isFinite(h.temp)&&h.temp<=0)cell.classList.add('cold');
-      cell.append(node('strong',temperature(h.temp)),node('small',h.type==='없음'?'무강수':h.type||'미수신'));
-      for(const w of hints?.byId.get(r.id)||[]) if(w.at===t && w.mode!=='rain'){
-        const label={candidate:'🚜 살포 후보',inspect:'⌕ 노면 확인',rainPatrol:'⌕ 순찰 확인',snow:'🚜 강설 준비',freezingRain:'어는비 확인'}[w.mode];
-        const b=button(label,()=>{$('hintReason').textContent=r.name+' '+stamp(t)+' · '+timingAdvice(w.mode);$('hintReason').scrollIntoView({block:'nearest'});});b.className='hint';cell.append(b);
+      cell.dataset.area=r.id;cell.dataset.at=t;cell.tabIndex=-1;
+      if(h?.wet)cell.classList.add('wet');
+      if(Number.isFinite(h?.temp)&&h.temp<=0)cell.classList.add('cold');
+      cell.append(node('strong',h?temperature(h.temp):'—'),node('small',h?.type==='없음'?'무강수':h?.type||''));
+      if(picked&&t<=floor){
+        cell.classList.add('can-place');cell.tabIndex=0;
+        cell.setAttribute('aria-label',r.name+' '+stamp(t)+' '+picked+' 시각 선택');
+      }
+      for(const item of hints?.byId.get(r.id)||[]) if(t>=item.at && t<=item.last){
+        const b=button(({예비살포:'🚜',본살포:'❄', '노면 확인':'⌕'})[item.stage]+' '+item.stage+' 검토',()=>explain(r,item));
+        b.className='hint '+(item.stage==='본살포'?'main-hint':'');b.title=item.text;b.setAttribute('aria-label',r.name+' '+stamp(t)+' '+item.stage+' 검토');cell.append(b);
+      }
+      for(const rec of records.filter(e=>e.type==='spread'&&e.area===r.id && e.at>=t&&e.at<t+H&&e.at<=now())){
+        cell.append(node('small',(rec.stage==='본살포'?'❄ ':'🚜 ')+rec.stage+' '+stamp(rec.at).slice(-5)+' 완료','actual'));
+      }
+      for(const rec of recent.filter(e=>e.area===r.id && e.at+THREE>=t && e.at+THREE<t+H)){
+        cell.append(node('small','◷ '+stamp(rec.at+THREE).slice(-5)+' 재살포 점검','actual'));
       }
     }
   }
@@ -238,9 +351,9 @@ function paintRules() {
   if(!matches.length)$('terms').textContent='일치하는 기준이 없습니다.';
 }
 function paint() {
-  if(hints&&Date.now()>=hintUntil)clearHints();
+  if(hints&&Date.now()>=hintUntil)clearHints('산출 후 10분이 지났습니다. 현재 예보로 다시 확인할 수 있습니다.');
   $('source').textContent=(demo?'모의 상황':'실시간 시험판')+' · '+stamp(now())+' KST';
-  $('feed').textContent=demo?'11월 24일 모의 기상 · 출발 예시 02시 고령 → 화원, 03시 함양 → 고령':refreshing?'기상 자료를 불러오는 중…':error||'예보 수신 '+stamp(forecastAt)+' · 5분 간격 갱신';
+  $('feed').textContent=demo?'모의 예보 · 전날 22:56 강우 뒤 하강 / 다음 날 가야면 11~13시 강설 예시':refreshing?'기상 자료를 불러오는 중…':error||'예보 수신 '+stamp(forecastAt)+' · 5분 간격 갱신';
   $('simulation').hidden=!demo;$('mode').textContent=demo?'실시간으로 돌아가기':'모의 상황 열기';
   for(const id of ['shift','hours','rules'])$(id).hidden=screen!==id;
   for(const b of document.querySelectorAll('[data-screen]'))b.setAttribute('aria-pressed',String(b.dataset.screen===screen));
@@ -287,6 +400,10 @@ $('actionForm').onsubmit=e=>{
   let point=$('point').value,label=$('point').selectedOptions[0]?.textContent;
   if(point==='custom'){label=$('site').value.trim().normalize('NFC');if(!label)return;point='site:'+label;}
   const record={type:kind,at,trip:trip.id,leg:li,point,label};
+  if(kind==='spread'){
+    const previous=entries().find(r=>r.area && r.trip===trip.id && r.leg===li && r.point===point);
+    if(previous) Object.assign(record,{area:previous.area,stage:'실제 살포'});
+  }
   if(kind==='field'){record.air=$('air').valueAsNumber;record.surface=$('surface').value;}
   try{save(record);}catch{$('actionError').textContent='이 기기에 저장할 수 없습니다.';return;}
   $('action').close();paint();
@@ -310,7 +427,7 @@ for(const b of document.querySelectorAll('[data-close]'))b.onclick=()=>b.closest
 for(const b of document.querySelectorAll('[data-screen]'))b.onclick=()=>{screen=b.dataset.screen;paint();};
 $('mode').onclick=()=>{
   demo=!demo;loadSeq++;refreshing=false;forecasts=[];observations=[];precip.clear();forecastAt=NaN;error='';clearHints();
-  if(demo&&!demoStore.size)seedDemo();
+  chooseStage('');if(demo&&!demoStore.size)seedDemo();
   refresh();
 };
 $('refresh').onclick=refresh;$('clock').onchange=()=>{clearHints();refresh();};$('query').oninput=paintRules;$('range').onchange=paintHours;
@@ -318,9 +435,111 @@ $('hints').onclick=async()=>{
   if(hints){clearHints();paint();return;}
   const b=$('hints');b.disabled=true;b.textContent='산출 중…';
   await new Promise(resolve=>requestAnimationFrame(()=>requestAnimationFrame(resolve)));
-  const byId=new Map(forecasts.map(r=>[r.id,snowWindows(r.hours,now(),48)]));
+  $('hintReason').textContent='';
+  const byId=new Map(forecasts.map(r=>[r.id,spreadingHints(r.hours,now())]));
   hints={byId,input:hintInput()};hintUntil=Date.now()+10*MIN;b.disabled=false;paint();
 };
+let showPast=false;
+const palette=$('tools'),grid=$('matrix');
+const stages=['예비살포','본살포'];
+function chooseStage(stage) {
+  picked=stage;
+  for(const b of palette.querySelectorAll('[data-stage]'))b.setAttribute('aria-pressed',String(stage===b.dataset.stage));
+  $('placement').textContent=stage?stage+' · 최근 6시간 또는 현재 시간 칸을 선택하세요.':'아이콘을 시간 칸에 끌거나, 아이콘과 칸을 차례로 누르세요.';
+  if(screen==='hours')paintHours();
+}
+function openGridTime(cell) {
+  if(!picked||!cell)return;
+  const t=Number(cell.dataset.at);
+  if(t>now()){$('placement').textContent='미래 시간에는 실제 살포를 표시할 수 없습니다.';return;}
+  quickTarget={area:cell.dataset.area,t,stage:picked,legs:[]};
+  const areaName=regions.get(quickTarget.area)?.name||quickTarget.area;
+  $('quickTitle').textContent='실제 '+picked;$('quickArea').textContent=areaName+' · '+stamp(t)+' 시간 칸';
+  $('quickTime').min=ktime(t);$('quickTime').max=ktime(Math.min(t+H-MIN,now()));
+  $('quickTime').value=ktime(now()-t<H?now():t);
+  const scope=$('quickScope');scope.replaceChildren(new Option(areaName+' 현장','area'));
+  for(const trip of activeTrips(entries()))trip.legs.forEach((leg,i)=>{
+    if(trip.at>=t+H)return;
+    quickTarget.legs.push({trip,li:i});
+    scope.add(new Option(leg.name+' · '+stamp(trip.at)+' 출발',String(quickTarget.legs.length-1)));
+  });
+  $('quickError').textContent='';quickDue();$('quick').showModal();
+}
+function quickDue(){
+  const at=inputMs('quickTime');
+  $('quickDue').textContent=Number.isFinite(at)?'재살포 점검 '+stamp(at+THREE):'실제 살포한 분을 선택하세요.';
+}
+$('quickTime').oninput=quickDue;
+$('quickForm').onsubmit=e=>{
+  e.preventDefault();const at=inputMs('quickTime'),q=quickTarget;
+  if(!q||at<q.t||at>=q.t+H||!Number.isFinite(at)||at>now())return;
+  const link=q.legs[Number.parseInt($('quickScope').value,10)];
+  if(link&&at<link.trip.at){$('quickError').textContent='차량 출발 이후 시각을 선택하세요.';return;}
+  const place=regions.get(q.area)?.name||q.area;
+  const leg=link?.trip.legs[link.li];
+  const record={type:'spread',stage:q.stage,area:q.area,at,point:leg?.facility?'facility':'site:'+place,label:leg?.facility?leg.name:place+' 현장'};
+  if(link)Object.assign(record,{trip:link.trip.id,leg:link.li});
+  const exists=entries().some(r=>r.type==='spread'&&r.area===q.area&&r.at===at&&r.trip===record.trip&&r.leg===record.leg&&r.point===record.point&&r.stage===q.stage);
+  if(!exists)try{save(record);}catch{$('quickError').textContent='이 기기에 저장할 수 없습니다.';return;}
+  $('quick').close();showPast=true;chooseStage('');
+  $('placement').textContent=place+' '+stamp(at).slice(-5)+' '+q.stage+' 반영 · '+stamp(at+THREE).slice(-5)+' 재살포 점검';
+  gridCell(q.area,q.t)?.scrollIntoView({block:'nearest',inline:'center'});
+};
+grid.addEventListener('click',e=>{
+  if(!picked)return;
+  const c=e.target.closest('td');if(c){e.preventDefault();e.stopPropagation();openGridTime(c);}
+},true);
+grid.addEventListener('keydown',e=>{
+  if(picked&&e.target.matches('td')&&['Enter',' '].includes(e.key)){e.preventDefault();openGridTime(e.target);}
+});
+let hover=null, touch=null, suppressTap=false;
+function highlight(cell){
+  hover?.classList.remove('drop-target');hover=cell?.matches('.can-place')?cell:null;hover?.classList.add('drop-target');
+}
+function track(x,y){
+  const bounds=grid.getBoundingClientRect();
+  if(y>=bounds.top && y<=bounds.bottom){
+    if(x>bounds.right-28)grid.scrollLeft+=24;
+    if(x<bounds.left+28)grid.scrollLeft-=24;
+    if(y>bounds.bottom-22)grid.scrollTop+=18;
+    if(y<bounds.top+22)grid.scrollTop-=18;
+  }
+  const target=document.elementFromPoint(x,y)?.closest('#matrix td');
+  highlight(target);return target;
+}
+for(const b of palette.querySelectorAll('[data-stage]')){
+  b.draggable=true;
+  b.onclick=()=>{if(!suppressTap)chooseStage(picked===b.dataset.stage?'':b.dataset.stage);};
+  b.ondragstart=e=>{
+    if(touch){e.preventDefault();return;}
+    chooseStage(b.dataset.stage);e.dataTransfer.setData('text/x-bionda-spread',picked);e.dataTransfer.effectAllowed='copy';
+  };
+  b.ondragend=()=>highlight(null);
+  b.onpointerdown=e=>{
+    if(e.pointerType==='mouse')return;
+    touch={id:e.pointerId,x:e.clientX,y:e.clientY,drag:false};b.setPointerCapture(e.pointerId);
+  };
+  b.onpointermove=e=>{
+    if(touch?.id!==e.pointerId)return;
+    if(!touch.drag&&Math.hypot(e.clientX-touch.x,e.clientY-touch.y)>8){touch.drag=true;chooseStage(b.dataset.stage);}
+    if(touch.drag){e.preventDefault();track(e.clientX,e.clientY);}
+  };
+  b.onpointerup=e=>{
+    if(touch?.id!==e.pointerId)return;
+    if(touch.drag){suppressTap=true;setTimeout(()=>{suppressTap=false;},350);openGridTime(track(e.clientX,e.clientY));}
+    touch=null;highlight(null);
+  };
+  b.onpointercancel=()=>{touch=null;highlight(null);};
+}
+grid.ondragover=e=>{
+  if(!picked||!e.dataTransfer.types.includes('text/x-bionda-spread'))return;
+  e.preventDefault();e.dataTransfer.dropEffect='copy';track(e.clientX,e.clientY);
+};
+grid.ondrop=e=>{
+  if(!stages.includes(e.dataTransfer.getData('text/x-bionda-spread')))return;
+  e.preventDefault();highlight(null);openGridTime(e.target.closest('td'));
+};
+$('history').onclick=()=>{showPast=!showPast;chooseStage('');};
 let lastMinute=Math.floor(now()/MIN);
 setInterval(()=>{
   if(document.hidden)return;
