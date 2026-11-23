@@ -46,20 +46,39 @@ let hints=null, hintUntil=0, picked='', quickTarget=null;
 const now=()=>demo?Date.parse(($('clock').value==='22:56'?'2026-11-23':demoDay)+'T'+$('clock').value+':00+09:00'):Date.now();
 const prefix='bionda:snow-helper:test:1:';
 let demoStore=new Map();
+// Store the whole column in one write. Existing point records and trip records
+// still use the same per-location timeline when a batch is displayed.
 function entries() {
-  if (demo) return [...demoStore.values()];
   const list=[];
-  try {
+  if(demo) list.push(...demoStore.values());
+  else try {
     for(let i=0;i<localStorage.length;i++){
       const k=localStorage.key(i);
       if(!k?.startsWith(prefix)) continue;
-      try { const r=JSON.parse(localStorage.getItem(k)); if(r?.type) list.push(r); } catch {}
+      try {const r=JSON.parse(localStorage.getItem(k));if(r?.type)list.push(r);} catch {}
     }
   } catch {error='이 기기에서 저장소를 사용할 수 없습니다.';}
-  return list;
+  const expanded=[], seen=new Set();
+  function add(r) {
+    if(r.type==='spread' && r.area){
+      const key=JSON.stringify([r.area,r.trip,r.leg,r.point,r.at,r.stage]);
+      if(seen.has(key))return;
+      seen.add(key);
+    }
+    expanded.push(r);
+  }
+  // Prefer the batch label if an identical manual mark already exists.
+  for(const batch of list.filter(r=>r.type==='areaBatch')){
+    for(const area of batch.areas){
+      const name=regions.get(area)?.name||area;
+      add({type:'spread',area,stage:batch.stage,at:batch.at,point:'site:'+name,label:name+' 현장',batch:true});
+    }
+  }
+  for(const r of list)if(r.type!=='areaBatch')add(r);
+  return expanded;
 }
 function save(record) {
-  const k=crypto.randomUUID();
+  const k=record.type==='areaBatch'?'all:'+record.at+':'+record.stage:crypto.randomUUID();
   if(demo) demoStore.set(k,record); else localStorage.setItem(prefix+k,JSON.stringify(record));
 }
 function activeTrips(records) {
@@ -151,7 +170,21 @@ function paintCards() {
     const ops=node('div',null,'actions');ops.append(button('운행 종료',()=>openAction(trip,0,'end')));card.append(ops);
     return {next,card};
   }).sort((a,b)=>a.next-b.next);
-  for(const r of latestGrid(records).filter(r=>!r.trip)){
+  const latest=latestGrid(records).filter(r=>!r.trip);
+  const batches=new Map();
+  for(const r of latest.filter(r=>r.batch)){
+    const key=r.at+' '+r.stage;
+    if(!batches.has(key))batches.set(key,[]);
+    batches.get(key).push(r);
+  }
+  for(const group of batches.values()){
+    const r=group[0],dueAt=r.at+THREE,c=node('article',null,'card'+(dueAt<=now()?' due':''));
+    c.append(node('h3','전 구간 '+r.stage+' · '+group.length+'곳 점검'),node('p',stamp(r.at)+' 실제 살포'),
+      node('strong',stamp(dueAt)+' 재살포 점검'),node('p',group.map(v=>regions.get(v.area)?.name||v.area).join(' · ')),
+      node('p','각 구간의 잔습과 실측 대기온도를 확인하세요.'));
+    cards.push({next:dueAt,card:c});
+  }
+  for(const r of latest.filter(r=>!r.batch)){
     const dueAt=r.at+THREE, c=node('article',null,'card'+(dueAt<=now()?' due':''));
     c.append(node('h3',regions.get(r.area)?.name+' · '+r.label),node('p',stamp(r.at)+' 실제 '+r.stage),
       node('strong',stamp(dueAt)+' 재살포 점검'),node('p','같은 구간의 노면이 계속 젖어 있고 실측 대기가 4℃ 이하인지 확인하세요.'));
@@ -312,7 +345,17 @@ function paintHours() {
   const records=entries(),recent=latestGrid(records);
   const table=node('table'),header=table.createTHead().insertRow();
   header.append(node('th','지역'));
-  for(let t=start;t<=end;t+=H) header.append(node('th',stamp(t)));
+  for(let t=start;t<=end;t+=H){
+    const head=node('th'); head.scope='col';
+    head.dataset.at=t;
+    if(picked && t<=floor){
+      const pick=button(stamp(t),()=>openGridTime(head));
+      pick.append(node('small','전 구간'));
+      pick.setAttribute('aria-label',stamp(t)+' 전 구간 '+picked);
+      head.classList.add('can-place');head.append(pick);
+    }else head.textContent=stamp(t);
+    header.append(head);
+  }
   const body=table.createTBody();
   for(const r of [...forecasts].sort((a,b)=>(a.routeOrder||0)-(b.routeOrder||0))){
     const row=body.insertRow();row.append(node('th',r.county+' '+r.name));
@@ -445,24 +488,30 @@ const stages=['예비살포','본살포'];
 function chooseStage(stage) {
   picked=stage;
   for(const b of palette.querySelectorAll('[data-stage]'))b.setAttribute('aria-pressed',String(stage===b.dataset.stage));
-  $('placement').textContent=stage?stage+' · 최근 6시간 또는 현재 시간 칸을 선택하세요.':'아이콘을 시간 칸에 끌거나, 아이콘과 칸을 차례로 누르세요.';
+  $('placement').textContent=stage?stage+' · 맨 위 시간은 전 구간, 지역 칸은 한 곳을 선택합니다.':'아이콘을 놓거나 선택 후 눌러 주세요. 맨 위 시간은 전 구간, 지역 칸은 한 곳에 반영합니다.';
   if(screen==='hours')paintHours();
 }
 function openGridTime(cell) {
   if(!picked||!cell)return;
   const t=Number(cell.dataset.at);
   if(t>now()){$('placement').textContent='미래 시간에는 실제 살포를 표시할 수 없습니다.';return;}
-  quickTarget={area:cell.dataset.area,t,stage:picked,legs:[]};
+  const all=cell.tagName==='TH';
+  quickTarget={area:cell.dataset.area,t,stage:picked,legs:[],all};
+  $('quickScopeLabel').hidden=all;
+  $('quickApply').textContent=all?'전 구간 반영':'표에 반영';
   const areaName=regions.get(quickTarget.area)?.name||quickTarget.area;
-  $('quickTitle').textContent='실제 '+picked;$('quickArea').textContent=areaName+' · '+stamp(t)+' 시간 칸';
+  $('quickTitle').textContent=all?'전 구간 살포를 하시나요?':'실제 '+picked;
+  $('quickArea').textContent=all?stamp(t)+' 시간 칸 · 예보표 '+regions.size+'개 지역 전체에 '+picked+'를 반영합니다.':areaName+' · '+stamp(t)+' 시간 칸';
   $('quickTime').min=ktime(t);$('quickTime').max=ktime(Math.min(t+H-MIN,now()));
   $('quickTime').value=ktime(now()-t<H?now():t);
-  const scope=$('quickScope');scope.replaceChildren(new Option(areaName+' 현장','area'));
-  for(const trip of activeTrips(entries()))trip.legs.forEach((leg,i)=>{
-    if(trip.at>=t+H)return;
-    quickTarget.legs.push({trip,li:i});
-    scope.add(new Option(leg.name+' · '+stamp(trip.at)+' 출발',String(quickTarget.legs.length-1)));
-  });
+  if(!all){
+    const scope=$('quickScope');scope.replaceChildren(new Option(areaName+' 현장','area'));
+    for(const trip of activeTrips(entries()))trip.legs.forEach((leg,i)=>{
+      if(trip.at>=t+H)return;
+      quickTarget.legs.push({trip,li:i});
+      scope.add(new Option(leg.name+' · '+stamp(trip.at)+' 출발',String(quickTarget.legs.length-1)));
+    });
+  }
   $('quickError').textContent='';quickDue();$('quick').showModal();
 }
 function quickDue(){
@@ -473,6 +522,14 @@ $('quickTime').oninput=quickDue;
 $('quickForm').onsubmit=e=>{
   e.preventDefault();const at=inputMs('quickTime'),q=quickTarget;
   if(!q||at<q.t||at>=q.t+H||!Number.isFinite(at)||at>now())return;
+  if(q.all){
+    try {save({type:'areaBatch',stage:q.stage,at,areas:[...regions.keys()]});}
+    catch {$('quickError').textContent='전 구간 입력을 저장하지 못했습니다.';return;}
+    $('quick').close();showPast=true;chooseStage('');
+    $('placement').textContent='전 구간 '+regions.size+'곳 · '+stamp(at)+' '+q.stage+' 반영 · '+stamp(at+THREE)+' 재살포 점검';
+    grid.querySelector('thead th[data-at="'+q.t+'"]')?.scrollIntoView({block:'nearest',inline:'center'});
+    return;
+  }
   const link=q.legs[Number.parseInt($('quickScope').value,10)];
   if(link&&at<link.trip.at){$('quickError').textContent='차량 출발 이후 시각을 선택하세요.';return;}
   const place=regions.get(q.area)?.name||q.area;
@@ -487,7 +544,7 @@ $('quickForm').onsubmit=e=>{
 };
 grid.addEventListener('click',e=>{
   if(!picked)return;
-  const c=e.target.closest('td');if(c){e.preventDefault();e.stopPropagation();openGridTime(c);}
+  const c=e.target.closest('[data-at]');if(c){e.preventDefault();e.stopPropagation();openGridTime(c);}
 },true);
 grid.addEventListener('keydown',e=>{
   if(picked&&e.target.matches('td')&&['Enter',' '].includes(e.key)){e.preventDefault();openGridTime(e.target);}
@@ -504,7 +561,7 @@ function track(x,y){
     if(y>bounds.bottom-22)grid.scrollTop+=18;
     if(y<bounds.top+22)grid.scrollTop-=18;
   }
-  const target=document.elementFromPoint(x,y)?.closest('#matrix td');
+  const target=document.elementFromPoint(x,y)?.closest('#matrix [data-at]');
   highlight(target);return target;
 }
 for(const b of palette.querySelectorAll('[data-stage]')){
@@ -537,7 +594,7 @@ grid.ondragover=e=>{
 };
 grid.ondrop=e=>{
   if(!stages.includes(e.dataTransfer.getData('text/x-bionda-spread')))return;
-  e.preventDefault();highlight(null);openGridTime(e.target.closest('td'));
+  e.preventDefault();highlight(null);openGridTime(e.target.closest('[data-at]'));
 };
 $('history').onclick=()=>{showPast=!showPast;chooseStage('');};
 let lastMinute=Math.floor(now()/MIN);

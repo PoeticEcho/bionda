@@ -6,3 +6,6 @@
 .palette{display:flex;flex-wrap:wrap;align-items:center;gap:5px 8px;padding:7px 0}.palette strong,.palette button{font-size:13px}.palette small{flex-basis:100%}.palette [data-stage]{touch-action:none;cursor:grab}.palette [aria-pressed=true]{color:white;background:var(--teal)}
 #hintReason:not(:empty){background:#fff4dd;color:#5d431d;padding:8px;border-radius:8px;margin:5px 0}
 .can-place{cursor:crosshair;box-shadow:inset 0 -2px #82b7a4}.drop-target,td.can-place:focus{outline:3px solid var(--teal);outline-offset:-3px}td .hint{display:block;margin:3px auto;color:#654417;white-space:nowrap}.main-hint{background:#e0f0ff;color:#214568!important}.actual{color:var(--teal);font-weight:750}
+thead th.can-place{padding:2px;background:#daf0e2}
+thead th.can-place button{width:100%;color:var(--teal);padding:3px 5px;border:0;background:transparent;font-variant-numeric:tabular-nums}
+thead th.can-place small{display:block;font-size:11px}.foot a{color:var(--teal);text-decoration:none}.foot a:hover,.foot a:focus-visible{text-decoration:underline}
