@@ -1,0 +1,27 @@
+<!doctype html>
+<html lang="ko"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
+<title>제설 근무 헬퍼 · 고령지사</title><link rel="stylesheet" href="shift.css">
+<script defer src="reference.js"></script><script defer src="rain-windows.js"></script><script defer src="shift.js"></script></head>
+<body><header><div class="bar"><strong>비온다</strong><span>고령지사</span><button id="mode">모의 상황 열기</button></div></header>
+<main><div class="title"><div><p id="source"></p><h1>제설 근무 헬퍼</h1></div><button id="refresh">기상 갱신</button></div>
+<p id="feed" role="status"></p>
+<div id="simulation" hidden>모의 시각 <select aria-label="모의 시각" id="clock"><option>04:50</option><option>05:00</option><option>05:10</option><option>06:00</option><option>08:10</option></select></div>
+<nav aria-label="화면"><button data-screen="shift" aria-pressed="true">근무 판단</button><button data-screen="hours" aria-pressed="false">시간별예보</button><button data-screen="rules" aria-pressed="false">제설 사전</button></nav>
+<section id="shift"><div class="heading"><div><h2>다음 재살포 점검</h2><p>출발 3시간 뒤 기상을 점검합니다. 문서 기준은 실제 살포한 시각부터 계산합니다.</p></div><button class="primary" id="dispatch">＋ 출발 입력</button></div><div id="cards"></div></section>
+<section id="hours" hidden><div class="heading"><h2>기상청 시간별예보</h2><div><select id="range" aria-label="예보 기간"><option value="12">12시간</option><option value="24">24시간</option><option value="tomorrow">내일까지</option></select> <button id="hints" aria-pressed="false">제설 힌트 켜기</button></div></div><p id="forecastSource"></p><div id="matrix" class="scroll"></div><p id="hintReason" role="status"></p></section>
+<section id="rules" hidden><h2>제설 사전</h2><label>조건·작업 검색<input type="search" id="query" placeholder="재살포, 어는비, 적설…"></label><div id="terms"></div></section>
+<p class="foot">고령지사 시험판 · 한국시간 · 작업 입력은 이 기기에 저장</p>
+</main>
+<dialog id="newTrip"><form id="tripForm"><div class="heading"><h2>차량 출발</h2><button type="button" data-close>닫기</button></div>
+<label>운행 형태<select id="shape"><option>편도</option><option>왕복</option><option>취약구간</option></select></label>
+<div class="pair" id="towns"><label>출발지<select id="from"></select></label><label>도착지<select id="to"></select></label></div>
+<div id="facilityBox" hidden><label>인근 본선 구간<select id="near"></select></label><label>시설·위치<input id="facility" maxlength="60" placeholder="예: 고령IC"></label><label>연결로<select id="ramp"><option>진입로</option><option>진출로</option></select></label></div>
+<div class="pair"><label>실제 출발 (한국시간)<input type="datetime-local" id="depart" required></label><label>편도 예상 소요 (분)<input type="number" id="duration" value="60" min="1" max="720" required></label></div>
+<p id="itinerary"></p><button class="primary">출발 반영</button><p id="tripError" role="status"></p></form></dialog>
+<dialog id="action"><form id="actionForm"><div class="heading"><h2 id="actionHeading"></h2><button type="button" data-close>닫기</button></div><p id="actionLeg"></p>
+<label id="pointLabel">살포 위치<select id="point"></select></label>
+<label id="siteLabel" hidden>현장 위치·이정<input id="site" maxlength="60"></label>
+<label>실제 시각 (한국시간)<input type="datetime-local" id="actionTime" required></label>
+<div class="pair" id="measure" hidden><label>실측 대기 (℃)<input id="air" type="number" step="0.1" min="-60" max="60"></label><label>노면 상태<select id="surface"><option value="">선택</option><option value="wet">계속 젖어 있음</option><option value="dry">건조</option><option value="other">기타·미확인</option></select></label></div>
+<button class="primary">반영</button><p id="actionError" role="status"></p></form></dialog>
+</body></html>
