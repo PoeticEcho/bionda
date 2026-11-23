@@ -116,6 +116,8 @@ function paintCards() {
     const head=node('div',null,'summary');
     head.append(node('strong',stamp(next),'time'),node('h3',trip.name),node('span',due?'점검 시각 도달':'다음 점검','status'));
     card.append(head,node('p',stamp(trip.at)+' 출발 · 출발 기준 점검 '+stamp(dep)+' · 편도 예상 '+trip.duration+'분'));
+    const eta=trip.at+trip.duration*MIN;
+    card.append(node('p',trip.name.includes(' ↔ ')?'예상 회차 '+stamp(eta)+' · 복귀 '+stamp(eta+trip.duration*MIN):'예상 도착 '+stamp(eta)));
     if(now()>=dep && !checked && earliest>dep) {
       card.append(button('출발 기준 기상 점검 완료',()=>{
         try { save({type:'review',trip:trip.id,at:now()});paint(); }
@@ -203,7 +205,7 @@ function paintHours() {
   const start=Math.floor(now()/H)*H;
   const tomorrowEnd=Date.parse(ktime(now()+24*H).slice(0,10)+'T23:00:00+09:00');
   const end=$('range').value==='tomorrow'?tomorrowEnd:start+(Number($('range').value)-1)*H;
-  $('forecastSource').textContent=(demo?'모의 예보':'기상청 예보')+' · 자료 '+stamp(forecastAt)+(hints?' · 비온다 자체 힌트 '+stamp(hintUntil)+'까지':'');
+  $('forecastSource').textContent=(demo?'모의 예보':'기상청 예보')+' · 자료 '+stamp(forecastAt)+(hints?' · 비온다 자체 힌트 '+stamp(now()+hintUntil-Date.now())+'까지':'');
   $('hints').setAttribute('aria-pressed',String(!!hints));$('hints').textContent=hints?'제설 힌트 끄기':'제설 힌트 켜기';
   if(!forecasts.length){$('matrix').textContent='시간별예보 수신 대기';return;}
   const table=node('table'),header=table.createTHead().insertRow();
