@@ -270,14 +270,40 @@ async function api(path) {
   if(!r.ok) throw Error('HTTP '+r.status);
   return r.json();
 }
+async function nightHistory() {
+  const start=shiftStart(now()), cutoff=now()-24*H;
+  const nights=[start];
+  if(start-8*H>=cutoff)nights.push(start-24*H);
+  const parts=await Promise.allSettled(nights.map(async t=>{
+    const url='https://raw.githubusercontent.com/PoeticEcho/bionda/shift-weather/nights/'+ktime(t).slice(0,10)+'.json';
+    const res=await fetch(url,{signal:AbortSignal.timeout(8000)});
+    if(res.status===404)return [];
+    if(!res.ok)throw Error('야간 자료 연결 지연');
+    const night=await res.json();
+    if(!Array.isArray(night.observations))throw Error('야간 자료 형식 오류');
+    return night.observations.filter(o=>readTime(o.time)>cutoff && readTime(o.time)<=now());
+  }));
+  const rows=parts.filter(p=>p.status==='fulfilled').flatMap(p=>p.value);
+  if(!rows.length && parts.some(p=>p.status==='rejected'))throw Error('야간 자료 연결 지연');
+  return rows;
+}
+async function loadHistory() {
+  const [worker,night]=await Promise.allSettled([handover.request('/history'),nightHistory()]);
+  const merged=new Map();
+  for(const source of [night,worker])if(source.status==='fulfilled' && Array.isArray(source.value)){
+    for(const r of source.value)merged.set([r.kind,r.id,r.time].join('|'),r);
+  }
+  if(!merged.size && worker.status==='rejected' && night.status==='rejected')throw Error('실황 연결 지연');
+  return {rows:[...merged.values()].sort((a,b)=>readTime(a.time)-readTime(b.time)),note:merged.size?(worker.status==='rejected'?'야간 기상 보관자료 연결':''):'보관 실황 미수신'};
+}
 async function refresh() {
   if(demo) {demoWeather();paint();return;}
   const seq=++loadSeq;refreshing=true;paint();
   const areas=[...new Set(activeTrips(entries()).flatMap(t=>t.legs.map(l=>sections[l.s].area)))];
-  const [fc,obs,hist]=await Promise.allSettled([api('/api/short-term-12?roster=13'),api('/api/road-obs?line=14'),handover.request('/history')]);
+  const [fc,obs,hist]=await Promise.allSettled([api('/api/short-term-12?roster=13'),api('/api/road-obs?line=14'),loadHistory()]);
   if(seq!==loadSeq||demo)return;
   const issues=[];
-  if(hist.status==='fulfilled' && Array.isArray(hist.value)){archive=hist.value;historyError='';}
+  if(hist.status==='fulfilled'){archive=hist.value.rows;historyError=hist.value.note;}
   else historyError='지난 24시간 실황 연결 지연';
 
   if(fc.status==='fulfilled' && Array.isArray(fc.value.regions)){forecasts=fc.value.regions;forecastAt=readTime(fc.value.updatedAt);}
