@@ -7,7 +7,7 @@ const kst = ms => new Date(ms + 9 * HOUR).toISOString().slice(0, 16);
 const stamp = ms => kst(ms).slice(5).replace('T', ' ');
 function phase(h) {
   if (['어는비','어는 비','어는 이슬비'].includes(h.type)) return 'freezingRain';
-  if (['눈','진눈깨비','비/눈','눈날림','빗방울/눈날림'].includes(h.type) || h.snowCm > 0 || ['2','3','6','7'].includes(String(h.pty))) return 'snow';
+  if (['눈','진눈깨비','비/눈','비·눈','눈날림','빗방울/눈날림','빗방울·눈날림'].includes(h.type) || h.snowCm > 0 || ['2','3','6','7'].includes(String(h.pty))) return 'snow';
   if (['비','빗방울','소나기'].includes(h.type) || h.wet === true || h.rainMm > 0 || ['1','4','5'].includes(String(h.pty))) return 'rain';
   if (h.wet === false || String(h.pty) === '0') return 'clear';
   return 'unknown';
@@ -90,10 +90,10 @@ function spreadingHints(hours, time) {
     const clock=t=>kst(t).slice(11);
     if(w.mode==='rain') continue;
     if(w.mode==='snow'){
-      if(w.start.ms>=floor) result.push({stage:'예비살포',at:w.at,last:w.at,
-        text:'눈·진눈깨비 시작 예보 '+clock(w.start.ms)+' · 현장에서 흩날리기 시작하면 예비살포 검토'});
-      result.push({stage:'본살포',at:w.at,last:w.end.ms,
-        text:'강설 예보 '+clock(w.start.ms)+'~'+clock(w.end.ms)+' · 차로에 눈이 쌓이면 본살포 검토. 노면 적설 3cm 미만은 염화물 살포, 3cm 이상은 적설 깊이에 따라 제설 작업을 병행합니다. (교육자료 12쪽)'});
+      if(w.start.ms>=floor) result.push({stage:'예비살포',at:floor,last:w.start.ms,
+        onset:w.start.ms,label:'예비살포 준비',text:clock(w.start.ms)+' '+w.start.type+' 예보 · 강설 전 차량과 취약구간을 확인하고 흩날리기 시작하면 예비살포를 검토하세요.'});
+      result.push({stage:'노면 확인',at:w.at,last:w.end.ms,label:'차로 적설 확인',
+        text:clock(w.at)+' '+w.start.type+' 예보 · 차로에 눈이 쌓이는지 확인하세요. 실제 적설이 확인되면 본살포를 검토합니다.'});
     } else if(w.mode==='candidate') {
       result.push({stage:'예비살포',at:w.at,last:w.cool.ms-HOUR,until:w.cool.ms,
         text:clock(w.end.ms)+' 마지막 비 → '+clock(w.cool.ms)+' 대기 '+temp(w.cool)+'℃. 비가 그치고 노면에 물기가 남으면 '+clock(w.at)+'부터 '+clock(w.cool.ms)+' 전까지 예비살포 검토.'+(w.cool.ms-w.end.ms>6*HOUR?' 강우 후 시간이 길어 실제 잔습 확인이 특히 중요합니다.':'')});

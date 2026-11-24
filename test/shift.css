@@ -9,3 +9,8 @@
 thead th.can-place{padding:2px;background:#daf0e2}
 thead th.can-place button{width:100%;color:var(--teal);padding:3px 5px;border:0;background:transparent;font-variant-numeric:tabular-nums}
 thead th.can-place small{display:block;font-size:11px}.foot a{color:var(--teal);text-decoration:none}.foot a:hover,.foot a:focus-visible{text-decoration:underline}
+#matrix th.current{box-shadow:inset 0 -3px var(--teal);color:var(--teal)}
+#matrix td.past{background-color:#f2f5f4}
+#matrix td.past.wet{background-color:#e1eff5}
+#matrix td button.actual{padding:2px 4px;font-size:11px}
+#crewStatus,.review-line{color:var(--teal)}

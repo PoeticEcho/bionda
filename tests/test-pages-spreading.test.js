@@ -25,8 +25,9 @@ test('Pages warns throughout the dry pre-treatment interval, including late over
 });
 test('Pages separates snowfall onset and lane accumulation checks from liquid rain or dry freezing',()=>{
   const snow=rules.spreadingHints(hours([4,2,1,0],['비','눈','진눈깨비']),base);
-  assert.ok(snow.some(w=>w.stage==='예비살포'&&w.at===base+H));
-  assert.ok(snow.some(w=>w.stage==='본살포'&&w.at===base+H&&w.last===base+2*H));
+  assert.ok(snow.some(w=>w.stage==='예비살포'&&w.at===base&&w.onset===base+H));
+  assert.ok(snow.some(w=>w.label==='차로 적설 확인'&&w.at===base+H&&w.last===base+2*H));
+  assert.ok(!snow.some(w=>w.stage==='본살포'));
   const cold=rules.spreadingHints(hours([4,0,-1],[]),base);
   assert.ok(cold.some(w=>w.stage==='노면 확인'));
   assert.ok(cold.every(w=>w.stage==='노면 확인'));

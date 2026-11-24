@@ -1,0 +1,11 @@
+name = "bionda-shift"
+main = "worker.mjs"
+compatibility_date = "2026-11-01"
+
+[triggers]
+crons = ["40 * * * *"]
+
+[[d1_databases]]
+binding = "DB"
+database_name = "bionda-shift-test"
+migrations_dir = "migrations"

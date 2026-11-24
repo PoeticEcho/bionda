@@ -1,25 +1,26 @@
 <!doctype html>
 <html lang="ko"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
-<title>제설 근무 헬퍼 · 고령지사</title><link rel="stylesheet" href="shift.css?v=area3">
-<script defer src="reference.js"></script><script defer src="rain-windows.js?v=area3"></script><script defer src="shift.js?v=area3"></script></head>
+<title>제설 근무 헬퍼 · 고령지사</title><link rel="stylesheet" href="shift.css?v=shift24">
+<script defer src="reference.js"></script><script defer src="rain-windows.js?v=shift24"></script><script defer src="snow-1119.js"></script><script defer src="handover.js?v=shift24"></script><script defer src="shift.js?v=shift24"></script></head>
 <body><header><div class="bar"><strong>비온다</strong><span>고령지사</span><button id="mode">모의 상황 열기</button></div></header>
 <main><div class="title"><div><p id="source"></p><h1>제설 근무 헬퍼</h1></div><button id="refresh">기상 갱신</button></div>
 <p id="feed" role="status"></p>
-<div id="simulation" hidden>모의 시각 <select aria-label="모의 시각" id="clock"><option value="22:56">전날 22:56 · 강우 뒤 하강</option><option selected>04:50</option><option>05:00</option><option>05:10</option><option>06:00</option><option>08:10</option><option>11:00</option></select></div>
+<div id="simulation" hidden><label>모의 사례 <select id="scenario"><option value="night">11월 23~24일 야간 살포</option><option value="snow">11월 19일 전 구간 예비살포</option><option value="handover">02:10 근무 인계 연습</option></select></label> 모의 시각 <select aria-label="모의 시각" id="clock"><option value="22:56">전날 22:56 · 강우 뒤 하강</option><option selected>04:50</option><option>05:00</option><option>05:27</option><option>05:10</option><option>02:30</option><option>07:20</option><option>06:00</option><option>08:10</option><option>11:00</option></select></div>
 <nav aria-label="화면"><button data-screen="hours" aria-pressed="true">예보·살포 판단</button><button data-screen="shift" aria-pressed="false">운행·재점검</button><button data-screen="rules" aria-pressed="false">제설 사전</button></nav>
 <section id="shift" hidden><div class="heading"><div><h2>다음 재살포 점검</h2><p>출발 3시간 뒤 기상을 점검합니다. 문서 기준은 실제 살포한 시각부터 계산합니다.</p></div><button class="primary" id="dispatch">＋ 출발 입력</button></div><div id="cards"></div></section>
 <section id="hours"><div class="heading"><h2>기상청 시간별예보</h2><div><select id="range" aria-label="예보 기간"><option value="12">12시간</option><option value="24">24시간</option><option value="tomorrow">내일까지</option></select> <button id="hints" aria-pressed="false">제설 힌트 켜기</button></div></div><p id="forecastSource"></p><div id="outlook" aria-live="polite"></div>
 <div id="tools" class="palette" aria-label="실제 살포 표시"><strong>실제 살포</strong>
 <button data-stage="예비살포" aria-pressed="false">🚜 예비살포</button><button data-stage="본살포" aria-pressed="false">❄ 본살포</button>
-<button id="history" aria-pressed="false">지난 6시간</button><small id="placement" role="status">아이콘을 놓거나 선택 후 눌러 주세요. 맨 위 시간은 전 구간, 지역 칸은 한 곳에 반영합니다.</small></div>
+<button id="history">현재 시각으로</button><button id="crew">근무 인계 연결</button><small id="crewStatus" role="status"></small><small id="placement" role="status">아이콘을 놓거나 선택 후 눌러 주세요. 맨 위 시간은 전 구간, 지역 칸은 한 곳에 반영합니다.</small></div>
 <p id="hintReason" role="status"></p><div id="matrix" class="scroll"></div></section>
 <section id="rules" hidden><h2>제설 사전</h2><label>조건·작업 검색<input type="search" id="query" placeholder="재살포, 어는비, 적설…"></label><div id="terms"></div></section>
-<p class="foot"><a href="https://poeticecho.github.io/etc/rwis/" target="_blank" rel="noopener">함양IC~옥포JC · RWIS 위험등급과 인근 CCTV ↗</a></p><p class="foot">고령지사 시험판 · 한국시간 · 작업 입력은 이 기기에 저장</p>
+<p class="foot"><a href="https://poeticecho.github.io/etc/rwis/" target="_blank" rel="noopener">함양IC~옥포JC · RWIS 위험등급과 인근 CCTV ↗</a></p><p class="foot">고령지사 시험판 · 한국시간 · 근무 인계 연결 시 작업 내역 공유</p>
 </main>
+<dialog id="crewDialog"><form id="crewForm"><div class="heading"><h2>근무 인계</h2><button type="button" data-close>닫기</button></div><label>근무자 인계 코드<input type="password" id="crewCode" required autocomplete="off"></label><button class="primary">연결</button><button type="button" id="disconnect">연결 해제</button><p id="crewError" role="status"></p></form></dialog>
 <dialog id="detail" aria-labelledby="detailHeading"><div class="heading"><h2 id="detailHeading"></h2><button type="button" data-close>닫기</button></div><p id="detailText"></p></dialog>
 <dialog id="quick"><form id="quickForm"><div class="heading"><h2 id="quickTitle">실제 살포</h2><button type="button" data-close>취소</button></div>
 <p id="quickArea"></p><label>실제 살포 시각 (한국시간)<input id="quickTime" type="datetime-local" required></label>
-<label id="quickScopeLabel">작업 구간<select id="quickScope"></select></label><p id="quickDue"></p><button class="primary" id="quickApply">표에 반영</button><p id="quickError" role="status"></p></form></dialog>
+<label id="quickScopeLabel">작업 구간<select id="quickScope"></select></label><p id="quickDue"></p><button class="primary" id="quickApply">표에 반영</button><button type="button" id="resolveConflict" hidden>공유된 최신 기록 사용</button><p id="quickError" role="status"></p></form></dialog>
 <dialog id="newTrip"><form id="tripForm"><div class="heading"><h2>차량 출발</h2><button type="button" data-close>닫기</button></div>
 <label>운행 형태<select id="shape"><option>편도</option><option>왕복</option><option>취약구간</option></select></label>
 <div class="pair" id="towns"><label>출발지<select id="from"></select></label><label>도착지<select id="to"></select></label></div>
@@ -30,6 +31,6 @@
 <label id="pointLabel">살포 위치<select id="point"></select></label>
 <label id="siteLabel" hidden>현장 위치·이정<input id="site" maxlength="60"></label>
 <label>실제 시각 (한국시간)<input type="datetime-local" id="actionTime" required></label>
-<div class="pair" id="measure" hidden><label>실측 대기 (℃)<input id="air" type="number" step="0.1" min="-60" max="60"></label><label>노면 상태<select id="surface"><option value="">선택</option><option value="wet">계속 젖어 있음</option><option value="dry">건조</option><option value="other">기타·미확인</option></select></label></div>
+<div class="pair" id="measure" hidden><label>실측 대기 (℃)<input id="air" type="number" step="0.1" min="-60" max="60"></label><label>노면 상태<select id="surface"><option value="">선택</option><option value="wet">계속 젖어 있음</option><option value="snow">차로 적설 확인</option><option value="dry">건조</option><option value="other">기타·미확인</option></select></label></div>
 <button class="primary">반영</button><p id="actionError" role="status"></p></form></dialog>
 </body></html>
