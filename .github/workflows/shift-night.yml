@@ -1,0 +1,46 @@
+name: Archive Goryeong night weather
+on:
+  schedule:
+    - cron: '40 9-23,0-1 * * *' # 18:40 through 10:40 KST, including the 10:00 KMA observation
+    - cron: '4 1 * * *' # road report nearest the 10:00 shift end
+    - cron: '4 9 * * *' # opening 18:00 forecast edition
+  workflow_dispatch:
+  push:
+    branches: [main]
+    paths: ['.github/workflows/shift-night.yml', 'scripts/shift-night.mjs']
+permissions:
+  contents: write
+concurrency:
+  group: archive-night-weather
+  cancel-in-progress: false
+jobs:
+  collect:
+    runs-on: ubuntu-latest
+    timeout-minutes: 12
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/checkout@v6
+        with:
+          ref: shift-weather
+          path: archive-data
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '24'
+      - name: Collect public KMA and road observations
+        id: collect
+        continue-on-error: true
+        run: node scripts/shift-night.mjs collect archive-data/nights
+      - name: Save available observations
+        working-directory: archive-data
+        run: |
+          mkdir -p nights
+          git add -- nights
+          if ! git diff --cached --quiet; then
+            git config user.name 'bionda weather archive'
+            git config user.email 'actions@users.noreply.github.com'
+            git commit -m "Archive overnight weather"
+            git push origin HEAD:shift-weather
+          fi
+      - name: Flag missing upstream data
+        if: steps.collect.outcome == 'failure'
+        run: exit 1
