@@ -35,6 +35,7 @@ jobs:
         run: |
           mkdir -p nights
           git add -- nights
+          if test -f status.json; then git add -- status.json; fi
           if ! git diff --cached --quiet; then
             git config user.name 'bionda weather archive'
             git config user.email 'actions@users.noreply.github.com'
