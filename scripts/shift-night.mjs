@@ -29,7 +29,7 @@ async function json(apiPath){
 
 export async function sample(at,load=json,clock=Date.now){
   const night=shiftDate(at), start=Date.parse(night+'T18:00:00+09:00'), end=start+16*H;
-  const observations=[],errors=[],received={areas:0,stations:0};
+  const observations=[],errors=[],delayed=[],received={areas:0,stations:0};
   const note=(name,e)=>errors.push(name+' · '+String(e.message||'응답 형식 확인').slice(0,160));
   function add(kind,id,value){
     const t=parseTime(value.time);
@@ -68,16 +68,25 @@ export async function sample(at,load=json,clock=Date.now){
   for(let i=0;i<groups.length;i+=3)await Promise.all(groups.slice(i,i+3).map(async group=>{
     const first=group[0];
     try{
-      const data=await load('/api/forecast?lat='+first.lat+'&lon='+first.lon);
-      const v=data.analysis?.now;
-      if(!v || !Number.isFinite(parseTime(v.time)) || (finite(v.temp)===null && !v.type))throw Error('실황 시각 또는 값 누락');
-      if(parseTime(v.time)<at-2*H)throw Error('지난 격자 실황 '+new Date(parseTime(v.time)).toISOString());
-      received.areas+=group.length;
+      const url='/api/forecast?lat='+first.lat+'&lon='+first.lon;
+      let v=(await load(url)).analysis?.now;
+      const expected=Math.floor((at-25*60000)/H)*H;
+      if(!(parseTime(v?.time)>=expected)){
+        // All callers for this edition share the retry URL. Retain the first genuine observation if the retry fails.
+        try {
+          const retry=(await load(url+'&edition='+expected)).analysis?.now;
+          if(Number.isFinite(parseTime(retry?.time)) && (!Number.isFinite(parseTime(v?.time)) || parseTime(retry.time)>parseTime(v.time)))v=retry;
+        } catch { /* The original timestamp remains available for archival. */ }
+      }
+      const t=parseTime(v?.time);
+      if(!Number.isFinite(t)||t>at|| (finite(v.temp)===null&&!v.type))throw Error('실황 시각 또는 값 누락');
+      if(t<expected)delayed.push({areas:group.map(r=>r.id),time:new Date(t).toISOString(),expected:new Date(expected).toISOString()});
+      if(t>=expected)received.areas+=group.length;
       for(const r of group)add('area',r.id,{time:v.time,temp:finite(v.temp),type:v.type??null,wet:typeof v.wet==='boolean'?v.wet:null});
     }catch(e){note(group.map(r=>r.id).join('/'),e);}
   }));
   await roads;
-  return {night,observations,edition:await edition,errors,received};
+  return {night,observations,edition:await edition,errors,delayed,received};
 }
 
 export function merge(previous,snapshot){
@@ -123,21 +132,20 @@ async function main(){
   console.log(data.night,'최근 수신 지역',data.received.areas,'관측소',data.received.stations,'보관 시간대 실황',data.observations.length,'예보지역',data.edition?.regions.length??0,'조회 실패',data.errors.join(',')||'없음');
   const start=Date.parse(data.night+'T18:00:00+09:00');
   await fs.mkdir(directory,{recursive:true});
-  const status={checkedAt:new Date(at).toISOString(),night:data.night,received:data.received,errors:data.errors};
+  const status={checkedAt:new Date(at).toISOString(),night:data.night,received:data.received,errors:data.errors,delayed:data.delayed};
   await fs.writeFile(path.join(directory,'..','status.json'),JSON.stringify(status,null,2)+'\n');
   if(process.env.GITHUB_ACTIONS && data.errors.length)
     console.log('::warning::'+data.errors.join(' / ').replace(/[%\r\n]/g,' '));
-  if(at>=start+17*H){
-    // A deployment or manual run outside the night checks upstreams only.
-    if(data.errors.length)process.exitCode=1;
-    return;
-  }
+  if(process.env.GITHUB_ACTIONS && data.delayed.length)
+    console.log('::warning::격자 실황 지연 · '+data.delayed.flatMap(d=>d.areas).join(', '));
+
   if(data.observations.length || data.edition){
     await fs.mkdir(directory,{recursive:true});
     let previous;
     try{previous=JSON.parse(await fs.readFile(file));}catch(e){if(e.code!=='ENOENT')throw e;}
     await fs.writeFile(file,JSON.stringify(merge(previous,data))+'\n');
   }
-  if(data.errors.length || !data.observations.length)process.exitCode=1;
+  const active=at<start+17*H;
+  if(data.errors.length || (!data.received.areas && !data.received.stations) || (active&&!data.observations.length))process.exitCode=1;
 }
 if(process.argv[1] && import.meta.url===pathToFileURL(process.argv[1]).href)main().catch(e=>{console.error(e.message);process.exitCode=1;});
