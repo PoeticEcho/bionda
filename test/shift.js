@@ -408,14 +408,14 @@ function summary(start,end) {
       groups.get(key).rows.push(r);
     }
     if(!groups.size && stage!=='예비살포')continue;
-    const card=node('div',null,'outlook-card');card.append(node('strong',stage+(stage==='노면 확인'?'':' 검토')));
+    const card=node('div',null,'outlook-card');card.append(node('strong',stage==='재점검'?'재살포 점검':stage+(stage==='노면 확인'?'':' 검토')));
     if(!groups.size) {
       const available=forecasts.some(r=>r.hours.some(h=>readTime(h.time)>=start && readTime(h.time)<=end && phase(h)!=='unknown'));
       card.append(node('p',!available?'해당 시간 예보 미수신 · 판단 보류':stage==='본살포'?'이 시간대에 강설·진눈깨비 근거 없음. 차로 적설을 확인하면 본살포를 판단하세요.':'이 시간대에 예비살포 후보를 뒷받침하는 예보가 없습니다.'));
     }else{
       for(const {item,rows} of [...groups.values()].sort((x,y)=>x.item.at-y.item.at)){
-        const text=stamp(item.at).slice(-5)+(item.until?'~'+stamp(item.until).slice(-5)+' 전':item.last>item.at?'~'+stamp(item.last).slice(-5):'')+' · '+rows.map(r=>r.name).join(', ');
-        const b=button((item.label?item.label+' · ':'')+(item.onset?stamp(item.onset).slice(-5)+' 강설 예정 · ':'')+text,()=>{
+        const text=(stage==='재점검'?'':stamp(item.at).slice(-5))+(item.until?'~'+stamp(item.until).slice(-5)+' 전':item.last>item.at?'~'+stamp(item.last).slice(-5):'')+(stage==='재점검'?'':' · ')+rows.map(r=>r.name).join(', ');
+        const b=button((item.label?item.label+' · ':'')+(item.onset?(ktime(item.onset).slice(0,10)===ktime(now()).slice(0,10)?'':'내일 ')+stamp(item.onset).slice(-5)+' 강설 예정 · ':'')+text,()=>{
           const t=Math.max(start,item.at);
           const cell=gridCell(rows[0].id,t);
           if(cell){cell.scrollIntoView({block:'nearest',inline:'center'});cell.focus({preventScroll:true});}
@@ -540,7 +540,12 @@ function paint() {
   $('crew').textContent=handover.token?'근무 인계 설정':'근무 인계 연결';
   const pending=handover.pending().length;
   $('crewStatus').textContent=demo?'모의 입력은 이 화면에서만 유지됩니다.':[handover.message||(!handover.token?'이 기기 기록 · 다른 근무자 살포 여부 미확인':'근무 인계 연결'),pending?'공유 대기 '+pending+'건':'',historyError].filter(Boolean).join(' · ');
-  $('source').textContent=(demo?'모의 상황':'실시간 시험판')+' · '+stamp(now())+' KST';
+  $('source').textContent='광주대구선 · '+(demo?'모의 상황':'야간 근무')+' · '+stamp(now())+' 기준';
+  const collected=forecasts.filter(r=>r.hours?.length).length;
+  $('regionCount').textContent=forecasts.length?String(collected):'—';
+  const recent=entries().filter(r=>r.type==='spread' && r.at>=shiftStart(now()) && r.at<=now()).reduce((last,r)=>Math.max(last,r.at),0);
+  $('lastTreatment').textContent=recent?stamp(recent).slice(-5):'미확인';
+  $('lastTreatment').classList.toggle('unknown',!recent);
   $('feed').textContent=demo?$('scenario').selectedOptions[0].textContent+' · 사례 재현':refreshing?'기상 자료를 불러오는 중…':error||'예보 수신 '+stamp(forecastAt)+' · 5분 간격 갱신';
   $('simulation').hidden=!demo;$('mode').textContent=demo?'실시간으로 돌아가기':'모의 상황 열기';
   for(const id of ['shift','hours','rules'])$(id).hidden=screen!==id;

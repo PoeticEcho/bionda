@@ -8,9 +8,22 @@ const isStr = (s,n=100) => typeof s === 'string' && s.length > 0 && s.length <= 
 const uuid = s => typeof s === 'string' && /^[0-9a-f-]{36}$/i.test(s);
 const number = v => v == null || v === '' || !Number.isFinite(Number(v)) ? null : Number(v);
 
-async function gridWeather(grid, base, env) {
+async function gridWeather(region, base, env) {
+  const grid=region.grid;
   const key = core.getServiceKey(env);
-  if (!key) throw Error('KMA_SERVICE_KEY 미설정');
+  if (!key) {
+    const url=new URL('https://bionda.pages.dev/api/forecast');
+    url.search=new URLSearchParams({lat:region.lat,lon:region.lon});
+    const res=await fetch(url,{signal:AbortSignal.timeout(15000)});
+    if(!res.ok)throw Error('비온다 격자 실황 조회 실패');
+    const obs=(await res.json()).analysis?.now;
+    if(!obs)return null;
+    const actual=typeof obs.time==='object' && obs.time && /^\d{8}$/.test(obs.time.date) && /^\d{4}$/.test(obs.time.time)
+      ? obs.time.date.slice(0,4)+'-'+obs.time.date.slice(4,6)+'-'+obs.time.date.slice(6)+'T'+obs.time.time.slice(0,2)+':'+obs.time.time.slice(2)+':00+09:00'
+      : obs.time;
+    if(!Number.isFinite(Date.parse(actual)))return null;
+    return {time:actual,temp:number(obs.temp),type:obs.type??null,wet:typeof obs.wet==='boolean'?obs.wet:null};
+  }
   const hub = /^[\w-]{20,26}$/.test(key);
   const url = new URL('getUltraSrtNcst',hub ? core.APIHUB_FCST_BASE : core.DATA_GO_KR_BASE);
   url.search = new URLSearchParams({serviceKey:core.deEncodedKey(key),
@@ -41,7 +54,7 @@ export async function collect(env, time) {
     groups.get(key).push(r);
   }
   const results=await Promise.allSettled([...(Array.from(groups.values(),async rows=>{
-    const weather=await gridWeather(rows[0].grid,base,env);
+    const weather=await gridWeather(rows[0],base,env);
     if (weather) for(const r of rows) store('area',r.id,weather);
   })),(async()=>{
     const res=await fetch('https://bionda.pages.dev/api/road-obs?line=14',{signal:AbortSignal.timeout(15000)});

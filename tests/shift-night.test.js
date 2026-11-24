@@ -32,3 +32,16 @@ test('match distinguishes departure, fresh observations and forecasts actually a
   assert.equal(report.atWork.forecast.capturedAt,ed(-60000).capturedAt);
   assert.equal(report.checkKind,'출발 후 기상 점검');assert.equal(report.atCheck.area,null);
 });
+test('delayed grid readings stay in their measured hour and do not count as latest coverage',async()=>{
+  const {sample}=await import('../scripts/shift-night.mjs');
+  const at=when('2026-11-25T02:40:00'), time=new Date(at-160*60000).toISOString();
+  const data=await sample(at,async url=>{
+    if(url.includes('short-term'))return {updatedAt:new Date(at).toISOString(),regions:[]};
+    if(url.includes('road-obs'))return {stations:[{stnId:'14209',time:new Date(at).toISOString()}]};
+    if(url.includes('&edition='))throw Error('timeout');
+    return {analysis:{now:{time,temp:3,type:'비',wet:true}}};
+  });
+  assert.equal(data.received.areas,0);assert.equal(data.received.stations,1);
+  assert.equal(data.delayed.flatMap(x=>x.areas).length,13);
+  assert.ok(data.observations.filter(r=>r.kind==='area').every(r=>r.time===time));
+});

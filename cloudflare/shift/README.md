@@ -8,7 +8,7 @@ GitHub Pages의 `/bionda/test/`는 기상 예보를 기존 Pages API에서, 지�
 
 1. `wrangler d1 create bionda-shift-test`로 생성한 데이터베이스의 ID를 `wrangler.toml`의 DB 바인딩에 `database_id`로 지정합니다. 이미 생성했다면 기존 데이터베이스를 사용합니다.
 2. `wrangler d1 migrations apply DB --remote`로 테이블을 생성합니다.
-3. `wrangler secret put SHIFT_TEAM_TOKEN`과 `wrangler secret put KMA_SERVICE_KEY`로 근무자 인계 코드와 기상청 키를 설정합니다.
+3. `wrangler secret put SHIFT_TEAM_TOKEN`으로 근무자 인계 코드를 설정합니다. 격자 실황은 기존 비온다 API의 기상청 연결을 사용합니다. 기상청에 직접 연결할 때만 `KMA_SERVICE_KEY`를 별도로 설정합니다.
 4. `wrangler deploy` 후 `/history`가 JSON 배열을 반환하고 인증 없이 요청한 `/operations`가 401인지 확인합니다. 매시 40분 수집 이후 원 관측 시각과 지역 수를 확인합니다. 수집 이전 시간과 누락된 관측은 미수신으로 표시합니다.
 5. 서로 다른 브라우저에서 인계 코드로 연결해 첫 기기의 살포 시각이 두 번째 기기에 표시되는지 확인합니다. 인계 화면은 접속·입력 시와 화면이 열려 있는 동안 30초마다 동기화합니다. 시각 수정은 표에 표시된 완료 표시를 누릅니다. 기기 기록은 연결 후 선택해 개별 공유합니다.
 
