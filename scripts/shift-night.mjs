@@ -20,7 +20,7 @@ function select(obj,keys){return Object.fromEntries(keys.map(k=>[k,obj[k]??null]
 async function json(apiPath){
   for(let attempt=0;attempt<2;attempt++){
     try{
-      const res=await fetch(origin+apiPath,{signal:AbortSignal.timeout(30000)});
+      const res=await fetch(origin+apiPath,{headers:{Accept:'application/json','User-Agent':'Bionda-Night-Weather/1.0 (+https://bionda.pages.dev/llms.txt)'},signal:AbortSignal.timeout(30000)});
       if(!res.ok)throw Error('HTTP '+res.status);
       return await res.json();
     }catch(e){if(attempt)throw e;}
@@ -30,6 +30,7 @@ async function json(apiPath){
 export async function sample(at,load=json,clock=Date.now){
   const night=shiftDate(at), start=Date.parse(night+'T18:00:00+09:00'), end=start+16*H;
   const observations=[],errors=[],received={areas:0,stations:0};
+  const note=(name,e)=>errors.push(name+' · '+String(e.message||'응답 형식 확인').slice(0,160));
   function add(kind,id,value){
     const t=parseTime(value.time);
     if(t>=start && t<=end && t<=at)
@@ -52,7 +53,7 @@ export async function sample(at,load=json,clock=Date.now){
     return {capturedAt,updatedAt:batch.updatedAt,
       sources:select(batch.sources||{},['shortBase','ultraBase']),regions:rows};
   }
-  const edition=capture().catch(()=>{errors.push('시간별예보');return null;});
+  const edition=capture().catch(e=>{note('시간별예보',e);return null;});
   const roads=(async()=>{
     const data=await load('/api/road-obs?line=14');
     if(!data.stations?.length)throw Error();
@@ -62,18 +63,18 @@ export async function sample(at,load=json,clock=Date.now){
       add('station',String(s.stnId),select(s,['name','lat','lon','time','temp','roadTemp','surfaceCode','surfaceState']));
     }
     if(!received.stations)throw Error('최근 도로관측 미수신');
-  })().catch(()=>errors.push('도로관측'));
+  })().catch(e=>note('도로관측',e));
   const groups=[...grids.values()];
   for(let i=0;i<groups.length;i+=3)await Promise.all(groups.slice(i,i+3).map(async group=>{
     const first=group[0];
     try{
       const data=await load('/api/forecast?lat='+first.lat+'&lon='+first.lon);
       const v=data.analysis?.now;
-      if(!v || !Number.isFinite(parseTime(v.time)) || (finite(v.temp)===null && !v.type))throw Error();
-      if(parseTime(v.time)<at-2*H)throw Error('지난 격자 실황');
+      if(!v || !Number.isFinite(parseTime(v.time)) || (finite(v.temp)===null && !v.type))throw Error('실황 시각 또는 값 누락');
+      if(parseTime(v.time)<at-2*H)throw Error('지난 격자 실황 '+new Date(parseTime(v.time)).toISOString());
       received.areas+=group.length;
       for(const r of group)add('area',r.id,{time:v.time,temp:finite(v.temp),type:v.type??null,wet:typeof v.wet==='boolean'?v.wet:null});
-    }catch{errors.push(...group.map(r=>r.id));}
+    }catch(e){note(group.map(r=>r.id).join('/'),e);}
   }));
   await roads;
   return {night,observations,edition:await edition,errors,received};
@@ -121,6 +122,11 @@ async function main(){
   const at=Date.now(),data=await sample(at), file=path.join(directory,data.night+'.json');
   console.log(data.night,'최근 수신 지역',data.received.areas,'관측소',data.received.stations,'보관 시간대 실황',data.observations.length,'예보지역',data.edition?.regions.length??0,'조회 실패',data.errors.join(',')||'없음');
   const start=Date.parse(data.night+'T18:00:00+09:00');
+  await fs.mkdir(directory,{recursive:true});
+  const status={checkedAt:new Date(at).toISOString(),night:data.night,received:data.received,errors:data.errors};
+  await fs.writeFile(path.join(directory,'..','status.json'),JSON.stringify(status,null,2)+'\n');
+  if(process.env.GITHUB_ACTIONS && data.errors.length)
+    console.log('::warning::'+data.errors.join(' / ').replace(/[%\r\n]/g,' '));
   if(at>=start+17*H){
     // A deployment or manual run outside the night checks upstreams only.
     if(data.errors.length)process.exitCode=1;
