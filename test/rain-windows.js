@@ -90,7 +90,8 @@ function spreadingHints(hours, time) {
     const clock=t=>kst(t).slice(11);
     if(w.mode==='rain') continue;
     if(w.mode==='snow'){
-      if(w.start.ms>=floor) result.push({stage:'예비살포',at:floor,last:w.start.ms,
+      const beforeSnow=Math.max(floor,w.start.ms-HOUR);
+      if(w.start.ms>=floor) result.push({stage:'예비살포',at:beforeSnow,last:beforeSnow,
         onset:w.start.ms,label:'예비살포 준비',text:clock(w.start.ms)+' '+w.start.type+' 예보 · 강설 전 차량과 취약구간을 확인하고 흩날리기 시작하면 예비살포를 검토하세요.'});
       result.push({stage:'노면 확인',at:w.at,last:w.end.ms,label:'차로 적설 확인',
         text:clock(w.at)+' '+w.start.type+' 예보 · 차로에 눈이 쌓이는지 확인하세요. 실제 적설이 확인되면 본살포를 검토합니다.'});
