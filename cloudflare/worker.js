@@ -52,11 +52,21 @@ import { handleRwisFetch } from './rwis-worker.js';
  * /rwis 프리픽스 — 광주대구선 RWIS·CCTV 대시보드 API (cloudflare/rwis-worker.js)
  *   /rwis              → rwis-worker 의 /
  *   /rwis/api/status   → rwis-worker 의 /api/status  (기존 bionda /api/* 와 충돌 없음)
+ *
+ * /api/rwis 도 같은 대상으로 위임합니다. (회사 PC 방화벽이 *.workers.dev 를 막는 환경에서
+ * 이미 Service Binding 으로 연결된 Pages 게이트웨이 bionda.pages.dev/api/* 를 통과시키기 위함)
+ *   /api/rwis              → /
+ *   /api/rwis/api/status   → /api/status
+ *   /api/rwis/api/cctv     → /api/cctv   (Pages functions 의 `/api/cctv` 정확 일치에도 걸리지 않음)
  */
-const RWIS_PREFIX = '/rwis';
+const RWIS_PREFIXES = ['/api/rwis', '/rwis'];
 
-function rewriteRwisRequest(request, url) {
-  const stripped = url.pathname.slice(RWIS_PREFIX.length) || '/';
+function matchRwisPrefix(pathname) {
+  return RWIS_PREFIXES.find(p => pathname === p || pathname.startsWith(`${p}/`)) || null;
+}
+
+function rewriteRwisRequest(request, url, prefix) {
+  const stripped = url.pathname.slice(prefix.length) || '/';
   const target = new URL(url.toString());
   target.pathname = stripped.startsWith('/') ? stripped : `/${stripped}`;
   return new Request(target.toString(), request);
@@ -693,9 +703,10 @@ export default {
     const requestUrl = new URL(request.url);
     const pathname = requestUrl.pathname;
 
-    // 광주대구선 RWIS·CCTV 대시보드는 /rwis 아래로 위임합니다. (프리픽스 제거 후 전달)
-    if (pathname === RWIS_PREFIX || pathname.startsWith(`${RWIS_PREFIX}/`)) {
-      return handleRwisFetch(rewriteRwisRequest(request, requestUrl), env, ctx);
+    // 광주대구선 RWIS·CCTV 대시보드는 /rwis, /api/rwis 아래로 위임합니다. (프리픽스 제거 후 전달)
+    const rwisPrefix = matchRwisPrefix(pathname);
+    if (rwisPrefix) {
+      return handleRwisFetch(rewriteRwisRequest(request, requestUrl, rwisPrefix), env, ctx);
     }
 
     if (request.method === 'OPTIONS') {

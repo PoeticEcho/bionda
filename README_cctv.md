@@ -132,31 +132,38 @@ jobs:
 ## 5. `/rwis` — 광주대구선 RWIS·CCTV 대시보드 API (같은 Worker에 통합)
 
 `PoeticEcho/etc/rwis/` 의 대시보드가 쓰는 광주대구선(함양IC~옥포JC) RWIS·CCTV API를
-같은 `bionda` Worker의 **`/rwis` 아래**로 합쳤습니다. 별도 Worker를 하나 더 쓰지 않습니다.
+같은 `bionda` Worker의 **`/rwis` 아래**로, 그리고 Pages 게이트웨이용 **`/api/rwis` 아래**로도 합쳤습니다.
+별도 Worker를 하나 더 쓰지 않습니다.
 
 | 파일 | 역할 |
 | --- | --- |
 | `cloudflare/rwis-worker.js` | 광주대구선 RWIS(16개 구간 = 8구간 × 2방향)·CCTV 123대 마스터 API (v2.3.0, 단독 배포도 가능) |
-| `cloudflare/worker.js` | 진입점 맨 앞에서 `/rwis`, `/rwis/*` 를 잡아 프리픽스를 떼고 `handleRwisFetch()` 로 위임 |
+| `cloudflare/worker.js` | 진입점 맨 앞에서 `/rwis`·`/api/rwis` 와 그 하위를 잡아 프리픽스를 떼고 `handleRwisFetch()` 로 위임 |
 
 | 요청 | 위임 대상 | 설명 |
 | --- | --- | --- |
-| `GET /rwis` | `/` | 안내(JSON) |
-| `GET /rwis/api/status` | `/api/status` | CCTV(123대) + RWIS(16개 구간) 통합 응답 (권장) |
-| `GET /rwis/api/cctv` | `/api/cctv` | ITS 목록 + 123대 마스터 매칭 (15분 캐시) |
-| `GET /rwis/api/rwis` | `/api/rwis` | 도로살얼음(FSM)·가시거리(VIR) 등급 (5분 캐시) |
-| `GET /rwis/api/stream?cctvId=cctv00005751` | `/api/stream` | 로드플러스 HLS 주소 + 스냅샷 (2분 캐시) |
+| `GET /rwis` · `GET /api/rwis` | `/` | 안내(JSON) |
+| `GET /rwis/api/status` · `GET /api/rwis/api/status` | `/api/status` | CCTV(123대) + RWIS(16개 구간) 통합 응답 (권장) |
+| `GET /rwis/api/cctv` · `GET /api/rwis/api/cctv` | `/api/cctv` | ITS 목록 + 123대 마스터 매칭 (15분 캐시) |
+| `GET /rwis/api/rwis` · `GET /api/rwis/api/rwis` | `/api/rwis` | 도로살얼음(FSM)·가시거리(VIR) 등급 (5분 캐시) |
+| `GET /rwis/api/stream?cctvId=...` · `GET /api/rwis/api/stream?cctvId=...` | `/api/stream` | 로드플러스 HLS 주소 + 스냅샷 (2분 캐시) |
 
+- **`*.workers.dev` 가 막힌 사내망**에서는 `https://bionda.pages.dev/api/rwis` 를 쓰세요.
+  Pages Functions(`functions/api/[[path]].js`)가 `/api/cctv` 만 정확 일치로 가로채고 나머지 `/api/*` 는
+  Service Binding(`env.API_WORKER`)으로 Worker에 그대로 넘기므로 `/api/rwis/api/cctv` 도 그대로 도달합니다.
 - 프리픽스를 떼고 넘기므로 기존 `bionda` 의 `/api/health`, `/api/cctv`(19지점 관제), `/api/forecast` 등과 **겹치지 않습니다.**
-- `/rwis/*` 는 bionda 자체의 `/api` 요청 한도(IP당 60초) 카운터를 쓰지 않습니다.
+- `/rwis/*`·`/api/rwis/*` 는 bionda 자체의 `/api` 요청 한도(IP당 60초) 카운터를 쓰지 않습니다.
 - 환경변수: `ITS_API_KEY`(이미 등록된 것을 그대로 사용), 필요하면 `RWIS_SOURCE_URL`·`RWIS_BASE`·`CCTV_SOURCE_URL` 추가.
   `RWIS_SOURCE_URL` 이 없으면 기상청 RWIS 3단계 API를 직접 호출합니다(무료 플랜 CPU 한도 주의).
 - 단일 파일 번들(Quick Edit)에도 포함됩니다: `npm run build:worker`
 
 ```bash
-curl -s "https://bionda.herego.workers.dev/rwis" | head -20
+# 직접 Worker (*.workers.dev)
 curl -s "https://bionda.herego.workers.dev/rwis/api/status" | head -40
-curl -s "https://bionda.herego.workers.dev/rwis/api/cctv" | head -20
+# Pages 게이트웨이 (사내망 우회 경로)
+curl -s "https://bionda.pages.dev/api/rwis/api/status" | head -40
+curl -s "https://bionda.pages.dev/api/rwis/api/cctv" | head -20
+curl -s "https://bionda.pages.dev/api/rwis/api/stream?cctvId=cctv00005751" | head -20
 ```
 
-테스트: `npm test` (`tests/rwis-route.test.js` 가 `/rwis` 위임·프리픽스 제거·쿼리 전달·기존 `/api/*` 무영향을 확인)
+테스트: `npm test` (`tests/rwis-route.test.js` 가 `/rwis`·`/api/rwis` 위임·프리픽스 제거·쿼리 전달·기존 `/api/*` 무영향을 확인)

@@ -220,3 +220,108 @@ test('/rwis 라우팅은 bionda 자체 rate limit·API 라우팅보다 먼저 �
   const health = await worker.fetch(new Request('https://bionda.herego.workers.dev/api/health', { headers: ip }), {});
   assert.equal(health.status, 200);
 });
+
+// ─────────────────────────────────────────────────────────────
+// /api/rwis — Pages 게이트웨이(bionda.pages.dev) 통과 경로
+//   회사 PC 방화벽이 *.workers.dev 를 막는 환경을 위한 동일 위임.
+// ─────────────────────────────────────────────────────────────
+
+test('/api/rwis 는 rwis-worker 의 / 로 위임된다 (Pages 게이트웨이용)', async () => {
+  const worker = await loadWorker();
+  const res = await worker.fetch(new Request('https://bionda.pages.dev/api/rwis'), {});
+  assert.equal(res.status, 200);
+  assert.equal(res.headers.get('access-control-allow-origin'), '*');
+  const body = await res.json();
+  assert.equal(body.ok, true);
+  assert.match(body.service, /광주대구선/);
+  assert.equal(body.version, '2.3.0');
+  assert.equal(body.master.points, 62);
+  assert.equal(body.master.cameras, 123);
+});
+
+test('/api/rwis/api/status 는 프리픽스를 떼고 CCTV·RWIS 를 함께 돌려준다', async () => {
+  const worker = await loadWorker();
+  await withFetch(
+    async (input) => {
+      const u = String(input);
+      if (u.includes('openapi.its.go.kr:9443/cctvInfo')) return jsonRes(ITS_SAMPLE);
+      if (u.includes('rwis_latest.json')) return jsonRes(RWIS_SOURCE_SAMPLE);
+      throw new Error(`unexpected upstream: ${u}`);
+    },
+    async () => {
+      const res = await worker.fetch(new Request('https://bionda.pages.dev/api/rwis/api/status?refresh=1'), {
+        ITS_API_KEY: 'test-its-key',
+        RWIS_SOURCE_URL: 'https://example.com/rwis_latest.json'
+      });
+      assert.equal(res.status, 200);
+      assert.equal(res.headers.get('access-control-allow-origin'), '*');
+      const body = await res.json();
+      assert.equal(body.ok, true);
+      assert.equal(body.cctv.kind, 'cctv');
+      assert.equal(body.rwis.kind, 'rwis');
+      assert.equal(body.cctv.points.length, 62);
+      assert.equal(body.master.zones.length, 8);
+      assert.deepEqual(body.errors, {});
+    }
+  );
+});
+
+test('/api/rwis/api/cctv 는 bionda 자신의 /api/cctv 핸들러가 아니라 rwis-worker 로 간다', async () => {
+  const worker = await loadWorker();
+  const called = [];
+  await withFetch(
+    async (input, init) => {
+      const u = String(input);
+      called.push({ url: u, method: (init && init.method) || 'GET' });
+      if (u.includes('openapi.its.go.kr:9443/cctvInfo')) return jsonRes(ITS_SAMPLE);
+      throw new Error(`unexpected upstream: ${u}`);
+    },
+    async () => {
+      const res = await worker.fetch(
+        new Request('https://bionda.pages.dev/api/rwis/api/cctv', { headers: { Origin: 'https://poeticecho.github.io' } }),
+        { ITS_API_KEY: 'test-its-key' }
+      );
+      assert.equal(res.status, 200);
+      assert.equal(res.headers.get('access-control-allow-origin'), '*');
+      const body = await res.json();
+      // rwis-worker 응답 형태(kind: 'cctv', 62지점 매칭) — bionda 자신의 sites[] 응답이 아님
+      assert.equal(body.kind, 'cctv');
+      assert.equal(body.points.length, 62);
+      assert.equal(body.sites, undefined);
+    }
+  );
+  assert.equal(called.length, 1);
+  assert.match(called[0].url, /openapi\.its\.go\.kr:9443\/cctvInfo/);
+});
+
+test('/api/rwis/api/stream 은 쿼리(cctvId)를 그대로 넘긴다', async () => {
+  const worker = await loadWorker();
+  const res = await worker.fetch(new Request('https://bionda.pages.dev/api/rwis/api/stream?cctvId=bad-id'), {});
+  assert.equal(res.status, 400);
+  const body = await res.json();
+  assert.equal(body.error, 'INVALID_CCTV_ID');
+});
+
+test('OPTIONS /api/rwis/api/status 는 204 + CORS 로 응답한다', async () => {
+  const worker = await loadWorker();
+  const res = await worker.fetch(
+    new Request('https://bionda.pages.dev/api/rwis/api/status', { method: 'OPTIONS' }),
+    {}
+  );
+  assert.equal(res.status, 204);
+  assert.equal(res.headers.get('access-control-allow-origin'), '*');
+});
+
+test('/api/rwis 경계는 bionda 의 /api/* 와 섞이지 않는다 (rwisfoo·rwis-other)', async () => {
+  const worker = await loadWorker();
+  for (const p of ['/api/rwisfoo/api/status', '/api/rwis-other', '/api/rwisx']) {
+    const res = await worker.fetch(new Request(`https://bionda.pages.dev${p}`), {});
+    assert.equal(res.status, 404, `${p} 는 위임되면 안 됩니다.`);
+    const body = await res.json();
+    assert.equal(body.error, 'API를 찾지 못했습니다.');
+  }
+  // bionda 자신의 /api/cctv 는 여전히 자기 핸들러 (ITS_API_KEY 없음 → 500)
+  const own = await worker.fetch(new Request('https://bionda.pages.dev/api/cctv'), {});
+  assert.equal(own.status, 500);
+  assert.equal((await own.json()).error, 'ITS_API_KEY_MISSING');
+});
