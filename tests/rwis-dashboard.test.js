@@ -483,4 +483,19 @@ test('P2.5 6h 실측 + 2h 예측 스파크라인 엔진(슬롯 조립·열관성
   // 4) 데이터 미수신 시에도 카드 높이가 흔들리지 않는 빈 플레이스홀더 SVG 반환
   const emptySvg = renderMicroSparklineSvg({ obs: [], pred: [] }, { kind: 'road', uid: 'empty' });
   assert.ok(emptySvg.includes('is-empty') && emptySvg.includes('viewBox="0 0 122 28"'));
+
+  // 5) 교량 결빙관측소(14409 죽산천교)에 기온(TA)이 전부 null이어도 같은 구간의 남상졸음(14207) 기온 6h 시계열로 자동 보완
+  const bridgeTrend = {
+    ok: true,
+    hours: 6,
+    times: payload.times,
+    stations: {
+      '14409': { name: '죽산천교(도)', km: 102.9, tr: payload.stations['14409'].tr, ta: payload.times.map(() => null) },
+      '14207': { name: '남상졸음(도)', km: 115.3, tr: payload.stations['14409'].tr, ta: payload.times.map((_, i) => Number((6.0 - i * 0.25).toFixed(1))) }
+    }
+  };
+  const bridgeSeries = buildZoneTempTrendSeries({ zone: z170, roadTrend: bridgeTrend, shortTerm13, nowMs });
+  assert.equal(bridgeSeries.stationName, '죽산천교(도)');
+  assert.equal(bridgeSeries.airStationName, '남상졸음(도)');
+  assert.ok(bridgeSeries.ta.obs.length >= 10, '교량 TA 결측 시 동일 구간 기온 관측소 6h 추세로 자동 보완되어야 함');
 });
