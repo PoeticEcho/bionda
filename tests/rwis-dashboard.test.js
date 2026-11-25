@@ -178,4 +178,137 @@ test('3개 메인 대시보드(index·hourly·rwis)가 공통 3탭 네비게이�
     const inlineScripts = [...html.matchAll(/<script(?![^>]*\bsrc=)[^>]*>([\s\S]*?)<\/script>/gi)];
     assert.equal(inlineScripts.length, 0, `${fname}에 인라인 <script>가 없어야 함`);
   }
+  const rwisHtml = fs.readFileSync(path.join(pubDir, 'rwis.html'), 'utf8');
+  assert.ok(rwisHtml.includes('data-side-tab="short6" role="tab" aria-selected="true"'), 'rwis.html 우측 기본 탭은 6H 단기예보여야 함');
+  assert.ok(rwisHtml.includes('data-side-tab="telemetry"'), '도로관측 탭이 존재해야 함');
+  assert.ok(rwisHtml.includes('data-side-tab="cctv"'), '지점·CCTV 탭이 존재해야 함');
+  assert.ok(rwisHtml.includes('id="bulletinCards"'), '특이사항 속보 영역이 존재해야 함');
+  assert.ok(rwisHtml.includes('id="short6Matrix"'), '6H 13개소 단기예보 표가 존재해야 함');
+});
+
+test('특이사항 속보: 5개 지역 특보 묶음 규칙(1개=1장, 2개=각각 2장, 3개+=1장 묶음) 및 6시간 특보 해제 감지를 검증한다', async () => {
+  const {
+    WATCH_WARNING_REGIONS,
+    updateWarningHistory,
+    buildSpecialBulletinCards
+  } = await import('../public/rwis-data.js');
+
+  assert.equal(WATCH_WARNING_REGIONS.length, 5);
+  const nowMs = Date.UTC(2026, 10, 25, 3, 0, 0); // 2026-11-25 12:00 KST
+  const makeWarnPayload = (regionNames, title = '대설주의보', level = '주의보', tmFc = '202611251030') => {
+    const items = {};
+    for (const r of WATCH_WARNING_REGIONS) {
+      items[`${r.lat.toFixed(3)},${r.lon.toFixed(3)}`] = {
+        name: r.name,
+        warnings: regionNames.includes(r.name)
+          ? [{ title, kind: title.replace(level, ''), level, tmFc, tmEf: '202611251100', announcedText: '11-25 10:30', effectiveText: '11-25 11:00' }]
+          : []
+      };
+    }
+    return { ok: true, warningsConfirmed: true, items };
+  };
+
+  // 1) 5개 지역 중 1개 지역만 특보 → 1장 단독 카드
+  const c1 = buildSpecialBulletinCards({ warningsPayload: makeWarnPayload(['함양군']), nowMs });
+  assert.equal(c1.length, 1);
+  assert.equal(c1[0].badge, '6h 특보 발표');
+  assert.ok(c1[0].title.includes('함양군'));
+
+  // 2) 5개 지역 중 2개 지역 특보 → 각각 1장씩 총 2장 카드
+  const c2 = buildSpecialBulletinCards({ warningsPayload: makeWarnPayload(['함양군', '거창군']), nowMs });
+  assert.equal(c2.length, 2);
+  assert.ok(c2[0].title.includes('함양군'));
+  assert.ok(c2[1].title.includes('거창군'));
+
+  // 3) 5개 지역 중 3개 지역 특보 → 1장의 묶음 카드
+  const c3 = buildSpecialBulletinCards({ warningsPayload: makeWarnPayload(['함양군', '거창군', '합천군']), nowMs });
+  assert.equal(c3.length, 1);
+  assert.equal(c3[0].count, 3);
+  assert.ok(c3[0].title.includes('3개 지역'));
+  assert.ok(c3[0].detail.includes('함양·거창·합천'));
+
+  // 4) 5개 전 지역 특보 → 전 구간 5개 지역 1장 묶음 카드
+  const c5 = buildSpecialBulletinCards({
+    warningsPayload: makeWarnPayload(['함양군', '거창군', '합천군', '고령군', '달성군']),
+    nowMs
+  });
+  assert.equal(c5.length, 1);
+  assert.ok(c5[0].title.includes('전 구간 5개 지역'));
+
+  // 5) 특보 해제 감지: 2개 지역 발효 → 해제 시 각각 2장 해제 카드, 6시간 초과 시 자동 만료
+  let hist = updateWarningHistory(null, makeWarnPayload(['함양군', '거창군']), nowMs);
+  hist = updateWarningHistory(hist, makeWarnPayload([]), nowMs + 30 * 60 * 1000);
+  const lifted2 = buildSpecialBulletinCards({
+    warningsPayload: makeWarnPayload([]),
+    warningHistory: hist,
+    nowMs: nowMs + 60 * 60 * 1000
+  });
+  assert.equal(lifted2.length, 2);
+  assert.equal(lifted2[0].category, 'warning-lifted');
+  assert.equal(lifted2[0].badge, '6h 특보 해제');
+
+  const expired = buildSpecialBulletinCards({
+    warningsPayload: makeWarnPayload([]),
+    warningHistory: hist,
+    nowMs: nowMs + 7 * 3600 * 1000
+  });
+  assert.equal(expired.length, 0);
+});
+
+test('특이사항 속보: 6시간 이내 영하/강수/겹침 및 24시간 이내 야간 영하 예고를 유형별로 묶어 표출한다', async () => {
+  const { SHORT13_ROUTE_ORDER, buildSpecialBulletinCards, alignShortTerm6hMatrix } = await import('../public/rwis-data.js');
+
+  const makeHours = (temps, wetIdxs = []) => temps.map((t, i) => ({
+    time: `2026-11-25T${String((12 + i) % 24).padStart(2, '0')}:00:00+09:00`,
+    hourKst: (12 + i) % 24,
+    isTomorrow: (12 + i) >= 24,
+    temp: t,
+    pop: wetIdxs.includes(i) ? 80 : 10,
+    wet: wetIdxs.includes(i),
+    rainMm: wetIdxs.includes(i) ? 2.5 : 0,
+    snowCm: 0,
+    pty: wetIdxs.includes(i) ? '1' : '0',
+    sky: wetIdxs.includes(i) ? '4' : '1',
+    isNight: ((12 + i) % 24) >= 18 || ((12 + i) % 24) < 6
+  }));
+
+  // 시나리오 A: 6시간 내에는 맑고 영상, 10시간 뒤(22시) 영하 진입 → 24h 이내 영하 예고 카드 1장
+  const nightFreezePayload = {
+    ok: true,
+    regions: SHORT13_ROUTE_ORDER.map((id, i) => ({
+      id,
+      name: `지역${i + 1}`,
+      county: '함양군',
+      admin: '경남',
+      color: '#38bdf8',
+      windowStart: '2026-11-25T12:00:00+09:00',
+      hours: makeHours(i < 4 ? [8, 8, 7, 6, 5, 4, 3, 2, 1, 0, -1, -2] : [8, 8, 7, 6, 5, 4, 3, 2, 2, 1, 1, 1])
+    }))
+  };
+  const mat = alignShortTerm6hMatrix(nightFreezePayload);
+  assert.equal(mat.headerHours.length, 6);
+  assert.equal(mat.rows.length, 13);
+
+  const cardsNight = buildSpecialBulletinCards({ shortTerm13: nightFreezePayload });
+  assert.equal(cardsNight.length, 1);
+  assert.equal(cardsNight[0].category, 'freeze-24h');
+  assert.equal(cardsNight[0].count, 4);
+
+  // 시나리오 B: 6시간 이내 강수 + 영하 동시 겹침 → 6h 결빙 겹침 + 6h 강수 + 6h 영하 카드
+  const urgentPayload = {
+    ok: true,
+    regions: SHORT13_ROUTE_ORDER.map((id, i) => ({
+      id,
+      name: `지역${i + 1}`,
+      county: '거창군',
+      admin: '경남',
+      color: '#f59e0b',
+      windowStart: '2026-11-25T12:00:00+09:00',
+      hours: makeHours(i < 2 ? [2, 1, -1, -2, -2, -1] : [3, 3, 2, 2, 2, 2], i < 2 ? [2, 3] : [])
+    }))
+  };
+  const cardsUrgent = buildSpecialBulletinCards({ shortTerm13: urgentPayload });
+  assert.ok(cardsUrgent.some(c => c.category === 'overlap-6h' && c.tone === 'crit'));
+  assert.ok(cardsUrgent.some(c => c.category === 'wet-6h'));
+  assert.ok(cardsUrgent.some(c => c.category === 'freeze-6h'));
 });
