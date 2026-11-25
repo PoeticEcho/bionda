@@ -616,7 +616,7 @@ async function serve(req, res, pathname) {
     const data = await fs.readFile(file);
     res.writeHead(200, {
       'Content-Type': TYPES[path.extname(file)] || 'application/octet-stream',
-      'Cache-Control': safe === '/index.html' || safe === '/hourly.html' ? 'no-cache' : 'public, max-age=300'
+      'Cache-Control': safe === '/index.html' || safe === '/hourly.html' || safe === '/rwis.html' ? 'no-cache' : 'public, max-age=300'
     });
     res.end(req.method === 'HEAD' ? undefined : data);
   } catch {
@@ -632,7 +632,7 @@ const server = http.createServer(async (req, res) => {
   res.setHeader('Permissions-Policy', 'camera=(), microphone=(), geolocation=(self)');
   res.setHeader(
     'Content-Security-Policy',
-    "default-src 'self'; img-src 'self' data: blob: https://*.weather.go.kr; style-src 'self' 'unsafe-inline'; script-src 'self'; worker-src 'self' blob:; media-src 'self' blob: https: http:; connect-src 'self' https: http://127.0.0.1:* http://localhost:*; frame-src https://embed.windy.com https://*.windy.com https://www.roadplus.co.kr https://*.roadplus.co.kr; base-uri 'self'; form-action 'self'; frame-ancestors 'none'"
+    "default-src 'self'; img-src 'self' data: blob: https://*.weather.go.kr https://*.hscdn.com; style-src 'self' 'unsafe-inline'; script-src 'self'; worker-src 'self' blob:; media-src 'self' blob: https: http:; connect-src 'self' https: http://127.0.0.1:* http://localhost:*; frame-src https://embed.windy.com https://*.windy.com https://www.roadplus.co.kr https://*.roadplus.co.kr; base-uri 'self'; form-action 'self'; frame-ancestors 'none'"
   );
   if (req.method === 'OPTIONS') {
     const requestUrl = new URL(req.url, 'http://localhost');
@@ -658,6 +658,20 @@ const server = http.createServer(async (req, res) => {
     applyApiCors(req, res);
     const ip = getClientIp(req);
     if (!allow(ip)) return sendJson(res, 429, { error: '요청이 너무 많습니다. 잠시 후 다시 이용해 주세요.' });
+
+    if (pathname === '/api/rwis' || pathname.startsWith('/api/rwis/')) {
+      try {
+        const { handleRwisFetch } = await import('./cloudflare/rwis-worker.js');
+        const strippedPath = pathname.slice('/api/rwis'.length) || '/';
+        const targetUrl = new URL(strippedPath + requestUrl.search, 'http://localhost');
+        const workerRes = await handleRwisFetch(new Request(targetUrl.toString(), { method: req.method }), process.env, null);
+        const hdrs = Object.fromEntries(workerRes.headers.entries());
+        res.writeHead(workerRes.status, hdrs);
+        return res.end(req.method === 'HEAD' ? undefined : Buffer.from(await workerRes.arrayBuffer()));
+      } catch (e) {
+        return sendJson(res, 502, { ok: false, error: errMessage(e) });
+      }
+    }
 
     if (pathname === '/api/health') {
       return sendJson(res, 200, {
