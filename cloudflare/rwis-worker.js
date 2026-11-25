@@ -219,8 +219,11 @@ async function fetchJsonOnce(url, init, timeoutMs, label) {
       });
     }
   } catch (err) {
-    if (err && err.code) throw err;
+    // DOMException(중단)은 code 가 숫자(20=ABORT_ERR)라 아래 httpError 의 code 검사에 걸립니다.
+    // 먼저 중단 여건을 판정해야 타임아웃이 UNKNOWN(20) 대신 UPSTREAM_TIMEOUT 으로 분류되고
+    // fetchJson 의 재시도도 동작합니다.
     const aborted = controller.signal.aborted || (err && err.name === 'AbortError');
+    if (!aborted && err && err.code) throw err;
     throw httpError(
       aborted ? 'UPSTREAM_TIMEOUT' : 'UPSTREAM_UNREACHABLE',
       aborted
@@ -326,7 +329,9 @@ async function fetchItsList(env) {
     });
   }
 
-  const json = await fetchJson(customSource || buildItsUrl(apiKey), {}, UPSTREAM_TIMEOUT_MS, 'ITS Open API');
+  // ITS 목록은 가끔 15초 안에 응답하지 않습니다. 한 번은 짧게 쉬고 다시 시도해
+  // 대시보드가 'CCTV 목록 오류'로 비지 않게 합니다.
+  const json = await fetchJson(customSource || buildItsUrl(apiKey), {}, UPSTREAM_TIMEOUT_MS, 'ITS Open API', 1);
   return { json, source: customSource ? 'CCTV_SOURCE_URL' : 'ITS 국가교통정보센터 Open API' };
 }
 
