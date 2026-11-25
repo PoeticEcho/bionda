@@ -562,4 +562,7 @@ test('P3 모듈 분리(snow-directive·minimap), 1시간 단기예보 24h 기본
   assert.ok(hourlyHtml.includes('class="hr-tbtn active" data-range="24"'), 'hourly.html 기본 활성 탭은 24시간이어야 함');
   assert.ok(hourlyJs.includes("range: '24'"), 'hourly.js state.range 기본값은 24여야 함');
   assert.ok(themeCss.includes('--ink: #0b1e21') && themeCss.includes('--muted: #2d494e'), '라이트모드 고대비 글자 토큰이 반영되어야 함');
+  const { computeTargetBrightness } = await import('../public/tv-guard.js');
+  assert.equal(computeTargetBrightness({ enabled: true, isAlert: false, isDesktop: true, isLightMode: true }), 1, '라이트모드에서는 회색 음영(brightness 0.92)을 씌우지 않아야 함');
+  assert.equal(computeTargetBrightness({ enabled: true, isAlert: false, isDesktop: true, isLightMode: false }), 0.92);
 });
