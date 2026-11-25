@@ -184,6 +184,44 @@ test('3개 메인 대시보드(index·hourly·rwis)가 공통 3탭 네비게이�
   assert.ok(rwisHtml.includes('data-side-tab="cctv"'), '지점·CCTV 탭이 존재해야 함');
   assert.ok(rwisHtml.includes('id="bulletinCards"'), '특이사항 속보 영역이 존재해야 함');
   assert.ok(rwisHtml.includes('id="short6Matrix"'), '6H 13개소 단기예보 표가 존재해야 함');
+  assert.ok(rwisHtml.includes('id="rwisReloadBtn"') && rwisHtml.includes('stamp-refresh-ico'), '실시간 상태 배지에 ↻ 새로고침 버튼이 통합되어야 함');
+  assert.ok(rwisHtml.includes('id="rwisBurnInBtn"'), '잔상방지 토글 버튼이 존재해야 함');
+});
+
+test('tv-guard: 1px 부드러운 픽셀이동 궤도(어지러움 방지), ON/OFF 저장, 평시 92%/경보 시 100% 휘도 복귀를 검증한다', async () => {
+  const {
+    PIXEL_ORBIT_STEPS,
+    CALM_BRIGHTNESS,
+    getOrbitOffset,
+    computeTargetBrightness,
+    readTvGuardEnabled,
+    writeTvGuardEnabled
+  } = await import('../public/tv-guard.js');
+
+  assert.ok(PIXEL_ORBIT_STEPS.length >= 30);
+  // 모든 스텝이 ±4px 이내이고, 인접 스텝(마지막→첫 스텝 포함) 이동 거리가 정확히 1px (어지러움 방지)
+  for (let i = 0; i < PIXEL_ORBIT_STEPS.length; i++) {
+    const a = getOrbitOffset(i);
+    const b = getOrbitOffset((i + 1) % PIXEL_ORBIT_STEPS.length);
+    assert.ok(Math.abs(a.dx) <= 4 && Math.abs(a.dy) <= 4, `step ${i} out of ±4px bounds`);
+    const manhattan = Math.abs(a.dx - b.dx) + Math.abs(a.dy - b.dy);
+    assert.equal(manhattan, 1, `step ${i}->${i + 1} must shift by exactly 1px (got ${manhattan}px)`);
+  }
+
+  // 기본 ON 및 localStorage ON/OFF 영속성
+  const mem = new Map();
+  const storage = { getItem: k => (mem.has(k) ? mem.get(k) : null), setItem: (k, v) => mem.set(k, String(v)) };
+  assert.equal(readTvGuardEnabled(storage), true);
+  writeTvGuardEnabled(false, storage);
+  assert.equal(readTvGuardEnabled(storage), false);
+  writeTvGuardEnabled(true, storage);
+  assert.equal(readTvGuardEnabled(storage), true);
+
+  // 평시 92%, 경보 시 즉시 100%, OFF 시 100%, 모바일 시 100%
+  assert.equal(computeTargetBrightness({ enabled: true, isAlert: false, isDesktop: true }), CALM_BRIGHTNESS);
+  assert.equal(computeTargetBrightness({ enabled: true, isAlert: true, isDesktop: true }), 1);
+  assert.equal(computeTargetBrightness({ enabled: false, isAlert: false, isDesktop: true }), 1);
+  assert.equal(computeTargetBrightness({ enabled: true, isAlert: false, isDesktop: false }), 1);
 });
 
 test('특이사항 속보: 5개 지역 특보 묶음 규칙(1개=1장, 2개=각각 2장, 3개+=1장 묶음) 및 6시간 특보 해제 감지를 검증한다', async () => {
