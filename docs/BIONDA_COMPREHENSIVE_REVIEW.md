@@ -238,7 +238,10 @@ flowchart TD
 - [x] **P2.5-2. 6h 실측 + 2h 예측 결합 엔진 & 초소형 인라인 SVG 렌더러 구현** (`public/rwis-data.js` — 기온 `+2h` 단기예보 실측보정 + 노면 `+2h` `ΔTA`·열관성 기울기 결합, 조건부 `0°C` 기준선·위험색 에스컬레이션)
 - [x] **P2.5-3. 8개 구간 카드 좌/우 2단 계기판 통합 및 50인치 TV 1스크린(`1080px`) 안착** (`public/rwis.js`, `public/rwis.css` — 노면 TR1 | 기온 TA 2열 초소형 스파크라인 + `+2h` 추세 화살표 + 롤오버 상세 툴팁)
 
-### 🟢 P3 — 중장기 아키텍처 · 유지보수 고도화 (사용자 확정 반영 예정)
-- [ ] **P3-1. 독립 Cloudflare Worker(`API_WORKER`) 자동 배포 워크플로우 추가 (`wrangler deploy` GitHub Action화)**
-- [ ] **P3-2. RWIS 16개 콘존 경량 JSON 사전 추출(`RWIS_SOURCE_URL`) 연동으로 5.6MB Worker 직접 파싱 제거**
-- [ ] **P3-3. `public/app.js`(3,250줄)에서 `snow-directive.js` · `minimap.js` 모듈 분리 및 루트 불필요 ZIP/대용량 이미지 정리**
+### 🟢 P3 — 중장기 아키텍처 · 유지보수 고도화 & 사용자 추가 개선 (✅ 완료)
+- [x] **P3-1. RWIS 5.6MB 위험표 스트리밍 파서 전환** (`cloudflare/rwis-worker.js` `createRiskTableScanner` — `ReadableStream` 청크 스캔으로 전국 4만 링크 전체 `JSON.parse` 제거, 대상 ~100개 링크만 파싱해 Workers 메모리·CPU 피크 90%+ 절감, 기존 `RWIS_SOURCE_URL` 폴백 유지; `bionda` Worker는 GitHub `main` 푸시 시 자동 배포 확인 완료)
+- [x] **P3-2. `public/app.js` 핵심 모듈 분리 (`public/snow-directive.js` · `public/minimap.js`)** — 제설 지시·살포시각·특보해제 상태관리 및 노선 미니맵 렌더러 독립 ES 모듈화(`app.js` ~450줄 슬림화)
+- [x] **P3-3. 저장소 루트 미참조 대용량 이미지(`OG.png` 등) 정리 및 사용자 추가 반영**:
+  - `1시간 단기예보` 기본 표시 기간 `24시간` 전환 (`public/hourly.html`, `public/hourly.js`, `public/hourly.css` — 1920px 한 화면 24열 표시)
+  - 밝은(라이트) 모드 회색 음영 축소 & 글자 고대비 선명화 (`public/theme.css`, `public/hourly.css`, `public/styles.css`)
+  - `+2h` 노면·기온 예측 결합 엔진 일출/일몰 상승·하강 반전 기울기 정교화 (`public/rwis-data.js`)

@@ -498,4 +498,68 @@ test('P2.5 6h 실측 + 2h 예측 스파크라인 엔진(슬롯 조립·열관성
   assert.equal(bridgeSeries.stationName, '죽산천교(도)');
   assert.equal(bridgeSeries.airStationName, '남상졸음(도)');
   assert.ok(bridgeSeries.ta.obs.length >= 10, '교량 TA 결측 시 동일 구간 기온 관측소 6h 추세로 자동 보완되어야 함');
+
+  // 6) 일출/주간 상승 반전 검증: 과거 2h 노면이 하강했더라도 다음 2h 기온이 상승(+0.5, +1.5°C)하면 +2h 예측이 상승 기울기로 전환
+  const sunriseShort13 = {
+    ok: true,
+    regions: [
+      {
+        id: 'sudong',
+        hours: [
+          { time: '2026-11-25T17:00:00+09:00', temp: 1 },
+          { time: '2026-11-25T18:00:00+09:00', temp: 2 },
+          { time: '2026-11-25T19:00:00+09:00', temp: 3 }
+        ]
+      }
+    ]
+  };
+  const sunriseSeries = buildZoneTempTrendSeries({ zone: z170, roadTrend: payload, shortTerm13: sunriseShort13, nowMs });
+  assert.ok(sunriseSeries.ta.pred2h > sunriseSeries.ta.curVal, '다음 2h 기온 상승 시 기온 예측은 상승 기울기여야 함');
+  assert.ok(sunriseSeries.tr.pred2h > sunriseSeries.tr.curVal, '일출 상승 반전 시 노면 예측도 상승 기울기로 전환되어야 함');
+});
+
+test('P3 모듈 분리(snow-directive·minimap), 1시간 단기예보 24h 기본, 라이트모드 선명도를 검증한다', async () => {
+  const { createSnowDirectiveStore, formatKstClock, parseKstHhmmToMs, getActionSignature } = await import('../public/snow-directive.js');
+  const { resolveStationKm } = await import('../public/minimap.js');
+
+  // 1) snow-directive.js 독립 동작 검증 (살포시각·특보해제·ACK 시그니처)
+  const mem = new Map();
+  const mockStorage = {
+    getItem: k => (mem.has(k) ? mem.get(k) : null),
+    setItem: (k, v) => mem.set(k, String(v))
+  };
+  const store = createSnowDirectiveStore({ storage: mockStorage });
+  const place = { name: '거창군남부', lat: 35.644, lon: 127.910 };
+  const nowMs = Date.parse('2026-11-25T08:00:00+09:00');
+  assert.equal(formatKstClock(nowMs), '08:00');
+  const parsedYesterday = parseKstHhmmToMs('23:30', nowMs);
+  assert.ok(parsedYesterday < nowMs && (nowMs - parsedYesterday) === 8.5 * 3600000, '자정 이전 입력 시각은 전일로 해석');
+
+  store.setSpreadTime(place, 'presalt', nowMs - 3600000);
+  assert.equal(store.getSpreadEntry(place, 'presalt', nowMs)?.atMs, nowMs - 3600000);
+  store.clearSpreadTime(place, 'presalt');
+  assert.equal(store.getSpreadEntry(place, 'presalt', nowMs), null);
+
+  store.syncSnowWarningHistory(place, { raw: [{ title: '대설주의보', kind: '대설' }] }, nowMs - 1800000);
+  store.syncSnowWarningHistory(place, { raw: [] }, nowMs);
+  assert.equal(store.getSnowWarningClearedState(place, { raw: [] }, nowMs + 60000).recentlyCleared, true);
+
+  const cards = [{ stageId: 'presalt', state: 'watch', pcChip: '예비살포 2h전' }];
+  assert.equal(getActionSignature(cards), 'presalt:watch:예비살포 2h전');
+  store.acknowledgeActionCards(place, cards);
+  assert.equal(store.getUnackedActionCards(place, { w: { ice: { decisionCards: cards } } }, nowMs).length, 0);
+  const escalated = [{ stageId: 'presalt', state: 'urgent', pcChip: '예비살포 즉시' }];
+  assert.equal(store.getUnackedActionCards(place, { w: { ice: { decisionCards: escalated } } }, nowMs).length, 1, '위험 격상 시 확인 숨김이 자동 해제되어야 함');
+
+  // 2) minimap.js 이정 해석 검증
+  assert.equal(resolveStationKm({ name: '죽산천교(도)' }), 102.9);
+  assert.equal(resolveStationKm({ name: '커스텀', milepostKm: 134.1 }), 134.1);
+
+  // 3) 1시간 단기예보 24시간 기본 & 라이트모드 선명도 검증
+  const hourlyHtml = fs.readFileSync(path.join(__dirname, '..', 'public', 'hourly.html'), 'utf8');
+  const hourlyJs = fs.readFileSync(path.join(__dirname, '..', 'public', 'hourly.js'), 'utf8');
+  const themeCss = fs.readFileSync(path.join(__dirname, '..', 'public', 'theme.css'), 'utf8');
+  assert.ok(hourlyHtml.includes('class="hr-tbtn active" data-range="24"'), 'hourly.html 기본 활성 탭은 24시간이어야 함');
+  assert.ok(hourlyJs.includes("range: '24'"), 'hourly.js state.range 기본값은 24여야 함');
+  assert.ok(themeCss.includes('--ink: #0b1e21') && themeCss.includes('--muted: #2d494e'), '라이트모드 고대비 글자 토큰이 반영되어야 함');
 });

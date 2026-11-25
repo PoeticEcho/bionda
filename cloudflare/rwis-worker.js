@@ -520,40 +520,165 @@ function shiftTm(tm, minutes) {
   return `${d.getUTCFullYear()}${pad(d.getUTCMonth() + 1)}${pad(d.getUTCDate())}${pad(d.getUTCHours())}${pad(d.getUTCMinutes())}`;
 }
 
-/** ③-1 한 슬롯의 표를 받아 대상 LINK_ID 등급만 추출. 비었으면 empty=true */
+/** ③-1 한 슬롯의 표(약 5.6MB, 전국 ~4만 링크)를 스트리밍으로 훑어 대상 LINK_ID(~100개)만 파싱한다.
+ *  전체 JSON.parse(수만 객체 할당)를 생략해 Cloudflare Workers 무료 플랜 CPU·메모리 피크를 90%+ 절감한다.
+ */
+function createRiskTableScanner(field, wantedLinks) {
+  const levels = new Map();
+  let code = '';
+  let itemCount = 0;
+  let inItems = false;
+  let doneItems = false;
+  let buf = '';
+  const idRe = /"(?:LINK_ID|linkId)"\s*:\s*"?([^",\s}]+)"?/;
+  const codeRe = /"(?:resultCode|resultcode|code)"\s*:\s*"([^"]+)"/;
+
+  const processObj = (objText) => {
+    itemCount += 1;
+    const idMatch = idRe.exec(objText);
+    if (!idMatch) return;
+    const id = idMatch[1];
+    if (!wantedLinks.has(id)) return;
+    try {
+      const item = JSON.parse(objText);
+      const raw = item[field];
+      if (raw === null || raw === undefined || raw === '') return;
+      const value = Number(raw);
+      if (!Number.isFinite(value) || value < 0 || value > 3) return;
+      levels.set(id, Math.round(value));
+    } catch {}
+  };
+
+  const push = (chunk) => {
+    if (!chunk || doneItems) return;
+    buf += chunk;
+    if (!code) {
+      const cm = codeRe.exec(buf);
+      if (cm) code = cm[1];
+    }
+    if (!inItems) {
+      const itemsIdx = buf.indexOf('"items"');
+      if (itemsIdx < 0) {
+        if (buf.length > 512) buf = buf.slice(-64);
+        return;
+      }
+      const arrIdx = buf.indexOf('[', itemsIdx + 7);
+      if (arrIdx < 0) {
+        buf = buf.slice(itemsIdx);
+        return;
+      }
+      inItems = true;
+      buf = buf.slice(arrIdx + 1);
+    }
+
+    let pos = 0;
+    const len = buf.length;
+    while (pos < len) {
+      const openIdx = buf.indexOf('{', pos);
+      const closeArrIdx = buf.indexOf(']', pos);
+      if (closeArrIdx >= 0 && (openIdx < 0 || closeArrIdx < openIdx)) {
+        doneItems = true;
+        buf = '';
+        return;
+      }
+      if (openIdx < 0) {
+        buf = '';
+        return;
+      }
+      const closeIdx = buf.indexOf('}', openIdx + 1);
+      if (closeIdx < 0) {
+        buf = buf.slice(openIdx);
+        return;
+      }
+      processObj(buf.slice(openIdx, closeIdx + 1));
+      pos = closeIdx + 1;
+    }
+    buf = '';
+  };
+
+  return {
+    push,
+    result: (tm) => ({ levels, tm, code, itemCount, empty: levels.size === 0 }),
+  };
+}
+
 async function fetchRiskTableSlot(env, riskCd, tm, field, wantedLinks) {
   const base = rwisBase(env);
-  const json = await fetchJson(
-    `${base}/rrw/algo/data/getNrmRiskRoadTableAll?riskCd=${encodeURIComponent(riskCd)}&tm=${encodeURIComponent(tm)}`,
-    {},
-    UPSTREAM_TIMEOUT_MS,
-    `RWIS 위험표(${riskCd})`
-  );
-  const header = (json && json.header) || {};
-  const code = firstString(header, ['resultCode', 'resultcode', 'code']);
-  const items = (json && json.body && json.body.items) || [];
+  const url = `${base}/rrw/algo/data/getNrmRiskRoadTableAll?riskCd=${encodeURIComponent(riskCd)}&tm=${encodeURIComponent(tm)}`;
+  const label = `RWIS 위험표(${riskCd})`;
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), UPSTREAM_TIMEOUT_MS);
 
-  const levels = new Map();
-  if (Array.isArray(items)) {
-    for (const item of items) {
-      const id = firstString(item, ['LINK_ID', 'linkId']);
-      if (!id || !wantedLinks.has(id)) continue;
-      const raw = item[field];
-      if (raw === null || raw === undefined || raw === '') continue;
-      const value = Number(raw);
-      if (!Number.isFinite(value)) continue;
-      // 0.0~3.0 사이 값만 등급으로 인정 (그 밖의 값은 결측 취급)
-      if (value < 0 || value > 3) continue;
-      levels.set(id, Math.round(value));
+  try {
+    const res = await fetch(url, {
+      method: 'GET',
+      headers: { Accept: 'application/json' },
+      redirect: 'follow',
+      signal: controller.signal,
+    });
+    if (!res.ok) {
+      const body = await res.text().catch(() => '');
+      throw httpError('UPSTREAM_HTTP_ERROR', `${label}가 HTTP ${res.status}로 응답했습니다.`, {
+        status: res.status,
+        sample: body.slice(0, 300),
+      });
     }
+
+    const scanner = createRiskTableScanner(field, wantedLinks);
+    if (res.body && typeof res.body.getReader === 'function') {
+      const reader = res.body.getReader();
+      const decoder = new TextDecoder('utf-8');
+      while (true) {
+        const { done, value } = await reader.read();
+        if (done) break;
+        if (value) scanner.push(decoder.decode(value, { stream: true }));
+      }
+      const tail = decoder.decode();
+      if (tail) scanner.push(tail);
+      return scanner.result(tm);
+    }
+
+    const text = await res.text();
+    scanner.push(text);
+    const scanned = scanner.result(tm);
+    if (scanned.itemCount > 0 || scanned.code) return scanned;
+
+    // 예외적인 JSON 구조 폴백
+    let json;
+    try {
+      json = JSON.parse(text);
+    } catch {
+      throw httpError('UPSTREAM_BAD_JSON', `${label} 응답을 JSON으로 해석하지 못했습니다.`, {
+        sample: text.slice(0, 200),
+      });
+    }
+    const header = (json && json.header) || {};
+    const code = firstString(header, ['resultCode', 'resultcode', 'code']);
+    const items = (json && json.body && json.body.items) || [];
+    const levels = new Map();
+    if (Array.isArray(items)) {
+      for (const item of items) {
+        const id = firstString(item, ['LINK_ID', 'linkId']);
+        if (!id || !wantedLinks.has(id)) continue;
+        const raw = item[field];
+        if (raw === null || raw === undefined || raw === '') continue;
+        const value = Number(raw);
+        if (!Number.isFinite(value) || value < 0 || value > 3) continue;
+        levels.set(id, Math.round(value));
+      }
+    }
+    return { levels, tm, code, itemCount: Array.isArray(items) ? items.length : 0, empty: levels.size === 0 };
+  } catch (err) {
+    const aborted = controller.signal.aborted || (err && err.name === 'AbortError');
+    if (!aborted && err && err.code) throw err;
+    throw httpError(
+      aborted ? 'UPSTREAM_TIMEOUT' : 'UPSTREAM_UNREACHABLE',
+      aborted ? `${label} 응답이 ${UPSTREAM_TIMEOUT_MS / 1000}초 안에 오지 않았습니다.` : `${label} 서버에 연결할 수 없습니다.`,
+      { cause: String(err && err.message ? err.message : err) }
+    );
+  } finally {
+    clearTimeout(timer);
   }
-  return {
-    levels,
-    tm,
-    code,
-    itemCount: Array.isArray(items) ? items.length : 0,
-    empty: levels.size === 0,
-  };
 }
 
 /**

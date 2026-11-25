@@ -325,3 +325,75 @@ test('/api/rwis 경계는 bionda 의 /api/* 와 섞이지 않는다 (rwisfoo·rw
   assert.equal(own.status, 500);
   assert.equal((await own.json()).error, 'ITS_API_KEY_MISSING');
 });
+
+test('P3-1: /api/rwis/api/rwis 는 5.6MB 대용량 위험표를 ReadableStream 청크 경계 분할 상태에서도 대상 링크만 스트리밍 추출한다', async () => {
+  const worker = await loadWorker();
+  const makeStreamRes = (jsonObj, chunkSize = 17) => {
+    const raw = Buffer.from(JSON.stringify(jsonObj), 'utf8');
+    const stream = new ReadableStream({
+      start(controller) {
+        for (let i = 0; i < raw.length; i += chunkSize) {
+          controller.enqueue(raw.subarray(i, i + chunkSize));
+        }
+        controller.close();
+      }
+    });
+    return {
+      ok: true,
+      status: 200,
+      body: stream,
+      text: async () => raw.toString('utf8'),
+      headers: new Map()
+    };
+  };
+
+  const conzoneResp = {
+    data: [
+      { conzoneId: '0120CZE160', conzoneNm: '함양IC-함양JC', conzoneLen: '2300', linkIdArrStr: '1570000100' },
+      { conzoneId: '0120CZS160', conzoneNm: '함양JC-함양IC', conzoneLen: '2300', linkIdArrStr: '1570000200' }
+    ]
+  };
+  const frTable = {
+    header: { resultCode: '00' },
+    body: {
+      items: [
+        { LINK_ID: '9999999999', FSM: 3 },
+        { LINK_ID: '1570000100', FSM: 2.0 },
+        { LINK_ID: '8888888888', FSM: 1 },
+        { LINK_ID: '1570000200', FSM: 1.0 }
+      ]
+    }
+  };
+  const vrTable = {
+    header: { resultCode: '00' },
+    body: {
+      items: [
+        { LINK_ID: '1570000100', VIR: 0.0 },
+        { LINK_ID: '1570000200', VIR: 2.0 }
+      ]
+    }
+  };
+
+  await withFetch(
+    async (input) => {
+      const u = String(input);
+      if (u.includes('getConZoneByRoadNo')) return jsonRes(conzoneResp);
+      if (u.includes('getNrmRoadRiskTimeSet')) return jsonRes({ body: { items: [{ nrmMaxTm: '202611251810' }] } });
+      if (u.includes('getNrmRiskRoadTableAll') && u.includes('riskCd=FR')) return makeStreamRes(frTable, 19);
+      if (u.includes('getNrmRiskRoadTableAll') && u.includes('riskCd=VR')) return makeStreamRes(vrTable, 13);
+      throw new Error(`unexpected url: ${u}`);
+    },
+    async () => {
+      const res = await worker.fetch(new Request('https://bionda.pages.dev/api/rwis/api/rwis'), {});
+      assert.equal(res.status, 200);
+      const body = await res.json();
+      assert.equal(body.ok, true);
+      const e160 = body.zones.find(z => z.id === '0120CZE160');
+      const s160 = body.zones.find(z => z.id === '0120CZS160');
+      assert.equal(e160.fsm.level, 2, '청크 경계로 쪼개진 FR 스트림에서 대상 링크 FSM=2를 정확히 추출해야 함');
+      assert.equal(s160.fsm.level, 1);
+      assert.equal(s160.vir.level, 2);
+      assert.equal(body.summary.fsmMax, 2);
+    }
+  );
+});
