@@ -208,36 +208,38 @@ flowchart TD
 
 다음 개선 스프린트에서 바로 선택해 진행할 수 있도록 효과 대비 난이도 순으로 정리했습니다.
 
-### 🔴 P0 — 즉시 체감 성능 · 안정성 개선 (코드 소폭 수정, 효과 매우 큼)
-- [ ] **P0-1. `rwis.js` API 경량화 (`/api/rwis/api/status` → `/api/rwis/api/rwis` 전환 + `/api/cctv` 15분 클라이언트 TTL 적용)**
+### 🔴 P0 — 즉시 체감 성능 · 안정성 개선 (✅ 완료)
+- [x] **P0-1. `rwis.js` API 경량화 (`/api/rwis/api/status` → `/api/rwis/api/rwis` 전환 + `/api/cctv` 15분 클라이언트 TTL 적용)**
   - **대상**: [public/rwis.js](file:///c:/Download/bionda/public/rwis.js)
-  - **효과**: 5분 주기 수신 용량 **446KB → 210KB(53% 절감)**, ITS 상류 중복 호출 제거
-- [ ] **P0-2. `12h` 구간 카드와 `6H/24h` 표의 영하 판정 기준 통일 (`temp < 0` 영하 vs `temp <= 0` 결빙경계 라벨 분리)**
-  - **대상**: [public/rwis-data.js](file:///c:/Download/bionda/public/rwis-data.js) (`summarizeShortRegion12h`)
-  - **효과**: 동일 화면 내 좌·우 영하 진입 시각 불일치(`22시` vs `04:00`) 완전 해소
-- [ ] **P0-3. [tests/worker.test.js](file:///c:/Download/bionda/tests/worker.test.js#L206) 정시 직후 간헐 테스트 실패(`11 !== 12`) 보정**
+  - **효과**: RWIS 응답 **188KB → 13.4KB(92.9% 절감)**, 5분 주기 전체 수신량 대폭 절감 및 ITS 상류 중복 호출 제거
+- [x] **P0-2. `12h` 구간 카드와 `6H/24h` 표의 영하 판정 기준 통일 (`temp < 0` 영하 vs `temp <= 0` 결빙경계 라벨 분리)**
+  - **대상**: [public/rwis-data.js](file:///c:/Download/bionda/public/rwis-data.js) (`summarizeShortRegion12h`), [public/rwis.js](file:///c:/Download/bionda/public/rwis.js)
+  - **효과**: 동일 화면 내 좌·우 영하 진입 시각 불일치(`22시` vs `04:00`) 완전 해소 (`0℃`는 `🧊 0°C(결빙주의)`로 별도 구분)
+- [x] **P0-3. [tests/worker.test.js](file:///c:/Download/bionda/tests/worker.test.js#L95) 정시 직후 간헐 테스트 실패(`11 !== 12`) 보정**
   - **대상**: `tests/worker.test.js`
-  - **효과**: CI(`pages.yml`) 시간대 무관 100% 통과 보장
+  - **효과**: 매시 `:00~:29` 구간 포함 24시간 언제 실행해도 전체 단위 테스트 100% 통과 보장
 
-### 🟠 P1 — 50인치 TV 시인성 및 동절기 제설 관제 시너지 강화
-- [ ] **P1-1. `rwis.html` `📢 특이사항 속보`에 실측 기반 [예비살포 조건 도달] 자동 감지 카드 추가**
-  - **대상**: [public/rwis-data.js](file:///c:/Download/bionda/public/rwis-data.js), [public/ice.js](file:///c:/Download/bionda/public/ice.js)
-  - **조건**: 대기온도 ≤ 4℃ & 노면온도(TR1) ≤ 2℃ & 강수/습윤 감지(또는 00~08시 어는비 조건) 시 구간명·관측소 노면온도와 함께 상단 속보 카드 자동 표출
-- [ ] **P1-2. `6H 단기예보 표` 원거리 시인성 개선 (저확률 `0~30%` 노이즈 완화 & `40%+`/강수량 강조)**
+### 🟠 P1 — 50인치 TV 시인성 · 실측 예비살포 속보 · 10분 지연 팝업 (사용자 확정 반영 예정)
+- [ ] **P1-1. `rwis.html` `📢 특이사항 속보`에 실측 기반 [예비살포 조건 도달] 자동 감지 카드 추가 + 10분 이상 데이터 미갱신 시 자연스러운 통합인증/인터넷 확인 안내 팝업**
+  - **대상**: [public/rwis-data.js](file:///c:/Download/bionda/public/rwis-data.js), [public/net-health.js](file:///c:/Download/bionda/public/net-health.js), [public/rwis.js](file:///c:/Download/bionda/public/rwis.js)
+  - **조건**: ① 대기 ≤ 4℃ & 노면(TR1) ≤ 2℃ & 강수/습윤 감지(또는 00~08시 어는비 조건) 시 구간명·관측소 노면온도 포함 속보 카드 자동 표출 ② 실시간 데이터 기준시각이 **10분 이상 갱신되지 않은 상태** 감지 시 통합인증 로그인/인터넷 연결 확인 팝업 표출
+- [ ] **P1-2. `6H 단기예보 표` 원거리 시인성 개선 (저확률 `0~30%` 노이즈 완화 & `40%+`/강수량·기온 크기 강화)**
   - **대상**: [public/rwis.css](file:///c:/Download/bionda/public/rwis.css), [public/rwis.js](file:///c:/Download/bionda/public/rwis.js)
-  - **효과**: 3~4m 거리에서도 눈·비 오는 시간대와 기온이 훨씬 또렷하게 식별됨
-- [ ] **P1-3. 3개 탭 위험등급 색상 시맨틱 통일 (`0단계 안전`을 하늘색 → 에메랄드/청록으로 조정해 강수/영하 파란색과 분리)**
+- [ ] **P1-3. 전 페이지 안전/정상 기준 색상 통일 (`#38dbf8` 사용자 지정 톤 기준 통일 및 강수·영하·경보 팔레트 정돈)**
   - **대상**: `public/rwis.js`, `public/rwis.css`, `public/styles.css`
 
-### 🟡 P2 — 3개 대시보드 UI/UX 일관성 통합
+### 🟡 P2 — 3개 대시보드 UI/UX · 테마 · 관할이정 표기 통일 (사용자 확정 반영 예정)
 - [ ] **P2-1. 상단 헤더 우측 첫 번째 버튼을 3개 탭 모두 `[● 실시간 HH:MM ↻]` 통합 새로고침 배지로 통일**
-  - **대상**: `public/index.html`, `public/hourly.html`, `public/styles.css`
-- [ ] **P2-2. 상황실 TV 전용 다크 테마 연동 옵션 (`index.html` ↔ `hourly.html` ↔ `rwis.html` 전환 시 눈부심 방지)**
-  - **대상**: `public/app.js`, `public/hourly.js`
-- [ ] **P2-3. 각 대시보드 부제에 관할 이정 범위 명시 (`전 노선 50~176k` vs `고령지사 연계 95~176k`)**
+- [ ] **P2-2. 3개 탭 테마 일치 (`index.html` · `hourly.html` · `rwis.html` 간 전환 시 눈부심 없는 통일 테마 연동)**
+- [ ] **P2-3. 관할 이정 표기 명확화 (`고령지사 관할 95~176k · 서쪽 선행지표 남원 50k~` 명시)**
 
-### 🟢 P3 — 중장기 아키텍처 · 유지보수 고도화
+### 🔵 P2.5 — 추가 기능: 8개 구간 카드 내 초소형 노면·기온 추이 스파크라인 (6시간 실측 + 2시간 예측)
+- **기술 타당성 실측 검증 결과 (✅ 구현 가능 · 저비용)**:
+  - **6시간 실측 확보 방법**: 기상청 도로기상관측 API `road_stn_obs.php` 실측 검증 결과, `mode=1&tm1=...&tm2=...`로 지점별 분단위 이력 조회 가능하며, 더 가벼운 방식으로 **`mode=2&var=14` 정시/30분 체크포인트 6~12회 조회**(전 노선 11개 관측소 포함 약 24~48KB)를 Cloudflare Edge 15분 캐시(`/api/road-obs-trend?line=14&hours=6`)로 제공하면 새로고침 직후에도 즉시 6시간 실측 곡선을 그릴 수 있음.
+  - **+2시간 예측 점선**: ① **기온(+2h)**은 기존 기상청 `short-term-12`의 `+1h/+2h` 예보 기온을 직접 연결하고, ② **노면온도(+2h)**는 최근 2시간 실측 `TR1` 하강/상승 기울기 + 기상청 `+1h/+2h` 대기기온 변화량(`ΔTA`)을 결합한 단기 추세선(점선 + `예측` 표시, `0℃` 수평 기준 점선 포함)으로 표현.
+  - **UI 배치**: 하단 8개 구간 카드 내부에 높이 ~28px 초소형 인라인 SVG 2줄(노면 실선+점선 / 기온 실선+점선)을 삽입해도 `1920×1080` 1스크린 유지 가능.
+
+### 🟢 P3 — 중장기 아키텍처 · 유지보수 고도화 (사용자 확정 반영 예정)
 - [ ] **P3-1. 독립 Cloudflare Worker(`API_WORKER`) 자동 배포 워크플로우 추가 (`wrangler deploy` GitHub Action화)**
-  - **효과**: Pages와 바인딩된 Worker 간 버전 불일치 및 `hourly-roster.mjs` `no-store` 강등 원천 차단
 - [ ] **P3-2. RWIS 16개 콘존 경량 JSON 사전 추출(`RWIS_SOURCE_URL`) 연동으로 5.6MB Worker 직접 파싱 제거**
 - [ ] **P3-3. `public/app.js`(3,250줄)에서 `snow-directive.js` · `minimap.js` 모듈 분리 및 루트 불필요 ZIP/대용량 이미지 정리**

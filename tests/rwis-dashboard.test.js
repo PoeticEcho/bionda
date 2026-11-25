@@ -163,8 +163,12 @@ test('rwis-data: 기존 기상청 도로기상관측·012도로위험·13개소 
 
   assert.equal(res.short13Summary.total, 13);
   assert.equal(res.short13Summary.wetCount, 1);
-  assert.equal(res.short13Summary.freezeCount, 2);
+  // P0-2 통일: 엄격 영하(< 0°C)는 sudong(-1°C) 1곳, okpo(0°C)는 firstZeroOrBelow 결빙경계로 구분
+  assert.equal(res.short13Summary.freezeCount, 1);
   assert.equal(res.short13Summary.overlapCount, 1);
+  const okpo = res.short13List.find(r => r.id === 'okpo');
+  assert.equal(okpo.firstFreeze, null);
+  assert.equal(okpo.firstZeroOrBelow?.temp, 0);
 });
 
 test('3개 메인 대시보드(index·hourly·rwis)가 공통 3탭 네비게이션과 엄격 CSP(인라인 script 없음)를 준수한다', () => {

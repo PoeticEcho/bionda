@@ -92,7 +92,8 @@ test('Cloudflare Worker는 CORS·OPTIONS·health·도로관측(중복 Ncst 생�
       return [{ category: 'PTY', obsrValue: '0' }, { category: 'RN1', obsrValue: '0' }, { category: 'T1H', obsrValue: '6.6' }];
     }
     const items = [];
-    for (let i = 1; i <= (resName === 'getUltraSrtFcst' ? 6 : 12); i++) {
+    // 현재 정시(i=0)부터 +14시간(+6시간 초단기)까지 생성해 매시 :00~:29 구간 실행 시에도 12시간 창을 안정적으로 충족
+    for (let i = 0; i <= (resName === 'getUltraSrtFcst' ? 6 : 14); i++) {
       const d = new Date(nowKst.getTime() + i * 3600000);
       const fcstDate = `${d.getUTCFullYear()}${pad(d.getUTCMonth() + 1)}${pad(d.getUTCDate())}`;
       const fcstTime = `${pad(d.getUTCHours())}00`;
