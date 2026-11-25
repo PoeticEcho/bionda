@@ -51,7 +51,9 @@ const {
   matchStationRiskForCoord,
   collectShortTerm12,
   parseOverviewPlacesParam,
-  canonicalOverviewPlacesKey
+  canonicalOverviewPlacesKey,
+  buildRoadTrendSlots,
+  assembleRoadTrendPayload
 } = core;
 
 // Load local .env if present and not already loaded
@@ -320,6 +322,78 @@ async function fetchRoadStations(line = ROAD_LINE_CODE) {
     const stale = getCached(staleKey);
     if (stale) return stale;
     throw new Error('도로기상관측 자료를 가져오지 못했습니다.');
+  });
+}
+
+async function fetchRoadStationsAtSlot(line, slot, bypassCache = false) {
+  const key = getRoadKey();
+  if (!key) return null;
+  if (slot.isLatest && !bypassCache) {
+    const liveHit = getCached(`road-obs|${line}`);
+    if (liveHit?.stations?.length) return liveHit.stations;
+  }
+  const slotCacheKey = `road-slot|${line}|${slot.tm1}`;
+  if (!bypassCache) {
+    const hit = getCached(slotCacheKey);
+    if (hit) return hit;
+  }
+  try {
+    const u = new URL('https://apihub.kma.go.kr/api/typ01/url/road_stn_obs.php');
+    u.searchParams.set('mode', '2');
+    u.searchParams.set('tm1', slot.tm1);
+    u.searchParams.set('var', String(line));
+    u.searchParams.set('disp', '1');
+    u.searchParams.set('help', '2');
+    u.searchParams.set('authKey', deEncodedKey(key));
+    const r = await fetchWithTimeout(u.toString(), {}, 4500);
+    if (!r.ok) return null;
+    const bytes = new Uint8Array(await r.arrayBuffer());
+    const text = new TextDecoder('euc-kr').decode(bytes);
+    const parsed = parseRoadStations(text);
+    if (parsed.length && parsed.some(s => s.temp !== null || s.roadTemp !== null)) {
+      setCached(slotCacheKey, parsed, slot.immutable ? 6 * 3600000 : 90000);
+      return parsed;
+    }
+  } catch {}
+  return null;
+}
+
+async function fetchRoadStationsTrend(line = ROAD_LINE_CODE, hours = 6, force = false) {
+  const key = getRoadKey();
+  if (!key) throw new Error('KMA_ROAD_KEY 또는 KMA_SERVICE_KEY 미설정');
+  const safeHours = Math.max(1, Math.min(12, Math.round(Number(hours) || 6)));
+  const cacheKey = `road-obs-trend|${line}|${safeHours}`;
+  const staleKey = `road-obs-trend-last-good|${line}|${safeHours}`;
+  const hit = !force ? getCached(cacheKey) : null;
+  if (hit) return hit;
+
+  return withInFlight(force ? `${cacheKey}|force` : cacheKey, async () => {
+    const nowMs = Date.now();
+    const slots = buildRoadTrendSlots(nowMs, { hours: safeHours, stepMin: 30 });
+    const slotResults = [];
+    for (let i = 0; i < slots.length; i += 4) {
+      const chunk = slots.slice(i, i + 4);
+      const settled = await Promise.allSettled(
+        chunk.map(async slot => ({
+          slot,
+          stations: await fetchRoadStationsAtSlot(line, slot, force && slot.isLatest)
+        }))
+      );
+      for (const item of settled) {
+        if (item.status === 'fulfilled' && item.value?.stations?.length) {
+          slotResults.push(item.value);
+        }
+      }
+    }
+    const payload = assembleRoadTrendPayload({ line, hours: safeHours, stepMin: 30, slotResults, nowMs });
+    if (payload.times.length > 0) {
+      setCached(cacheKey, payload, 5 * 60000);
+      setCached(staleKey, payload, 60 * 60000);
+      return payload;
+    }
+    const stale = getCached(staleKey);
+    if (stale) return stale;
+    throw new Error('도로기상관측 6시간 추세 자료를 가져오지 못했습니다.');
   });
 }
 
@@ -786,6 +860,19 @@ const server = http.createServer(async (req, res) => {
       try {
         const value = await fetchRoadStations(line);
         return sendJson(res, 200, value, { 'Cache-Control': 'public, max-age=60' });
+      } catch (e) {
+        return sendJson(res, 502, { error: errMessage(e) });
+      }
+    }
+
+    if (pathname === '/api/road-obs-trend') {
+      if (!getRoadKey()) return sendJson(res, 503, { code: 'ROAD_KEY_MISSING', error: '도로기상관측 API 키가 설정되지 않았습니다.' });
+      const line = requestUrl.searchParams.get('line') || ROAD_LINE_CODE;
+      const hours = Number(requestUrl.searchParams.get('hours')) || 6;
+      const force = requestUrl.searchParams.get('force') === '1' || requestUrl.searchParams.get('refresh') === '1';
+      try {
+        const value = await fetchRoadStationsTrend(line, hours, force);
+        return sendJson(res, 200, value, { 'Cache-Control': force ? 'no-store' : 'public, max-age=300' });
       } catch (e) {
         return sendJson(res, 502, { error: errMessage(e) });
       }

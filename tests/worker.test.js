@@ -199,6 +199,22 @@ test('Cloudflare Worker는 CORS·OPTIONS·health·도로관측(중복 Ncst 생�
     assert.equal(roadObsAttempt, 2);
     assert.equal(hitUrls.filter(u => u.includes('getUltraSrtNcst')).length, 0);
 
+    // P2.5: /api/road-obs-trend (6h 30-min historical slots + 5m memory cache hit on 2nd call)
+    const trendRes1 = await worker.fetch(new Request('https://bionda-api.workers.dev/api/road-obs-trend?line=14&hours=6'), env);
+    assert.equal(trendRes1.status, 200);
+    assert.ok(String(trendRes1.headers.get('cache-control')).includes('s-maxage=600'));
+    const trend1 = await trendRes1.json();
+    assert.equal(trend1.ok, true);
+    assert.equal(trend1.line, '14');
+    assert.equal(trend1.hours, 6);
+    assert.ok(Array.isArray(trend1.times) && trend1.times.length >= 10);
+    assert.ok(trend1.stations['14207'] && trend1.stations['14207'].tr.includes(7.4));
+    assert.ok(!JSON.stringify(trend1).includes('worker-secret-test-key'));
+    const roadCallsAfterFirst = hitUrls.filter(u => u.includes('road_stn_obs.php')).length;
+    const trendRes2 = await worker.fetch(new Request('https://bionda-api.workers.dev/api/road-obs-trend?line=14&hours=6'), env);
+    assert.equal(trendRes2.status, 200);
+    assert.equal(hitUrls.filter(u => u.includes('road_stn_obs.php')).length, roadCallsAfterFirst, '2차 /api/road-obs-trend 호출은 5분 메모리 캐시 적중');
+
     // Forecast
     const fcstRes = await worker.fetch(new Request('https://bionda-api.workers.dev/api/forecast?lat=35.644&lon=127.910'), env);
     assert.equal(fcstRes.status, 200);

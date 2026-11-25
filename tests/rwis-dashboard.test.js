@@ -417,3 +417,70 @@ test('P2 hourly formatMdHm은 epoch ms 숫자와 ISO 문자열 모두 KST MM-DD 
   assert.equal(formatMdHm('2026-11-25T17:33:00+09:00'), '11-25 17:33');
   assert.equal(formatMdHm('2026-11-25T08:33:00Z'), '11-25 17:33');
 });
+
+test('P2.5 6h 실측 + 2h 예측 스파크라인 엔진(슬롯 조립·열관성 예측·인라인 SVG)을 검증한다', async () => {
+  const core = await import('../lib/bionda-core.js');
+  const { buildZoneTempTrendSeries, renderMicroSparklineSvg, enrichZonesWithBionda } = await import('../public/rwis-data.js');
+
+  // 1) KST 30분 슬롯 생성 및 경량 JSON 조립 검증
+  const nowMs = Date.parse('2026-11-25T17:45:00+09:00');
+  const slots = core.buildRoadTrendSlots(nowMs, { hours: 6, stepMin: 30 });
+  assert.ok(slots.length >= 12 && slots.length <= 13, `6h 30분 슬롯 수는 12~13개여야 함 (got ${slots.length})`);
+  assert.equal(slots[slots.length - 1].isLatest, true);
+  assert.equal(slots[0].immutable, true);
+
+  const slotResults = slots.map((slot, idx) => ({
+    slot,
+    stations: [
+      { stnId: '14409', name: '죽산천교(도)', milepostKm: 102.9, roadTemp: Number((7.5 - idx * 0.5).toFixed(1)), temp: Number((5.5 - idx * 0.4).toFixed(1)) },
+      { stnId: '14206', name: '함양(도)', milepostKm: 95.0, roadTemp: idx === 3 ? null : 10.2, temp: 7.1 }
+    ]
+  }));
+  const payload = core.assembleRoadTrendPayload({ line: '14', hours: 6, stepMin: 30, slotResults, nowMs });
+  assert.equal(payload.ok, true);
+  assert.equal(payload.times.length, slots.length);
+  assert.equal(payload.stations['14409'].tr.length, slots.length);
+  assert.equal(payload.stations['14206'].tr[3], null, '결측 센서는 0이 아닌 null로 보존되어야 함');
+
+  // 2) 구간 170(죽산천교) 하강 추세 + 단기예보 강하 ΔTA 결합 → +2h 0°C 진입 감지
+  const enriched = enrichZonesWithBionda({
+    roadStations: [
+      { stnId: '14409', name: '죽산천교(도)', milepostKm: 102.9, roadTemp: 1.5, temp: 0.7, surfaceCode: 1, surfaceState: '건조' }
+    ]
+  });
+  const z170 = enriched.zones.find(z => z.suffix === '170');
+  assert.equal(z170.roadObs.stationId, '14409');
+
+  const shortTerm13 = {
+    ok: true,
+    regions: [
+      {
+        id: 'sudong',
+        hours: [
+          { time: '2026-11-25T17:00:00+09:00', temp: 1 },
+          { time: '2026-11-25T18:00:00+09:00', temp: 0 },
+          { time: '2026-11-25T19:00:00+09:00', temp: -1 }
+        ]
+      }
+    ]
+  };
+  const series = buildZoneTempTrendSeries({ zone: z170, roadTrend: payload, shortTerm13, nowMs });
+  assert.equal(series.tr.curVal, 1.5, '실황 표시 노면온도와 스파크라인 현재점이 일치해야 함');
+  assert.ok(series.tr.delta6h < -5, '6시간 누적 하강폭이 반영되어야 함');
+  assert.ok(series.tr.pred2h < series.tr.curVal, '하강 추세+기온 강하 시 +2h 노면 예측이 하락해야 함');
+  assert.ok(series.tr.pred2h <= 0.2, `+2h 노면온도가 0°C 부근까지 하강해야 함 (got ${series.tr.pred2h})`);
+  assert.equal(series.ta.pred2h, -1.3, '기온 +2h는 실측(0.7) + 예보 ΔTA(-2) = -1.3°C');
+  assert.equal(series.ta.crossesZeroSoon, true);
+
+  // 3) 인라인 SVG 스파크라인 렌더링 검증 (실선·점선·현재점·0° 기준선·위험색 에스컬레이션)
+  const svgRoad = renderMicroSparklineSvg(series.tr, { kind: 'road', uid: 'z170-tr' });
+  assert.ok(svgRoad.includes('sp-obs'), '6h 실측 실선 포함');
+  assert.ok(svgRoad.includes('sp-pred'), '+2h 점선 예측 포함');
+  assert.ok(svgRoad.includes('sp-now'), '현재 시점 앵커 점 포함');
+  assert.ok(svgRoad.includes('0°'), '결빙 근접 시 0° 기준선 표시');
+  assert.ok(svgRoad.includes('#fb7185'), '+2h 0.5°C 이하 진입 시 위험 로즈 색상 적용');
+
+  // 4) 데이터 미수신 시에도 카드 높이가 흔들리지 않는 빈 플레이스홀더 SVG 반환
+  const emptySvg = renderMicroSparklineSvg({ obs: [], pred: [] }, { kind: 'road', uid: 'empty' });
+  assert.ok(emptySvg.includes('is-empty') && emptySvg.includes('viewBox="0 0 122 28"'));
+});

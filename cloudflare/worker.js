@@ -39,7 +39,9 @@ import {
   matchStationRiskForCoord,
   collectShortTerm12,
   parseOverviewPlacesParam,
-  canonicalOverviewPlacesKey
+  canonicalOverviewPlacesKey,
+  buildRoadTrendSlots,
+  assembleRoadTrendPayload
 } from '../lib/bionda-core.js';
 import {
   CCTV_CACHE_TTL_SECONDS,
@@ -386,6 +388,81 @@ async function fetchRoadStations(env, line = getRoadLineCode(env), bypassCache =
     const stale = getCached(staleKey);
     if (stale) return stale;
     throw new Error('도로기상관측 자료를 가져오지 못했습니다.');
+  });
+}
+
+async function fetchRoadStationsAtSlot(env, line, slot, bypassCache = false) {
+  const key = getRoadKey(env);
+  if (!key) return null;
+  if (slot.isLatest && !bypassCache) {
+    const liveHit = getCached(`road-obs|${line}`);
+    if (liveHit?.stations?.length) return liveHit.stations;
+  }
+  const slotCacheKey = `road-slot|${line}|${slot.tm1}`;
+  if (!bypassCache) {
+    const hit = getCached(slotCacheKey);
+    if (hit) return hit;
+  }
+  try {
+    const u = new URL('https://apihub.kma.go.kr/api/typ01/url/road_stn_obs.php');
+    u.searchParams.set('mode', '2');
+    u.searchParams.set('tm1', slot.tm1);
+    u.searchParams.set('var', String(line));
+    u.searchParams.set('disp', '1');
+    u.searchParams.set('help', '2');
+    u.searchParams.set('authKey', deEncodedKey(key));
+    const r = await fetchWithTimeout(u.toString(), {}, 3500);
+    if (!r.ok) return null;
+    const bytes = new Uint8Array(await r.arrayBuffer());
+    const text = new TextDecoder('euc-kr').decode(bytes);
+    const parsed = parseRoadStations(text);
+    if (parsed.length && parsed.some(s => s.temp !== null || s.roadTemp !== null)) {
+      setCached(slotCacheKey, parsed, slot.immutable ? 6 * 3600000 : 90000);
+      return parsed;
+    }
+  } catch (e) {
+    console.warn('[fetchRoadStationsAtSlot] err tm1=' + slot.tm1, errMessage(e));
+  }
+  return null;
+}
+
+async function fetchRoadStationsTrend(env, line = getRoadLineCode(env), hours = 6, force = false) {
+  const key = getRoadKey(env);
+  if (!key) throw new Error('KMA_ROAD_KEY 또는 KMA_SERVICE_KEY 미설정');
+  const safeHours = Math.max(1, Math.min(12, Math.round(Number(hours) || 6)));
+  const cacheKey = `road-obs-trend|${line}|${safeHours}`;
+  const staleKey = `road-obs-trend-last-good|${line}|${safeHours}`;
+  const hit = !force ? getCached(cacheKey) : null;
+  if (hit) return hit;
+
+  return withInFlight(force ? `${cacheKey}|force` : cacheKey, async () => {
+    const nowMs = Date.now();
+    const slots = buildRoadTrendSlots(nowMs, { hours: safeHours, stepMin: 30 });
+    const slotResults = [];
+    // Cloudflare Workers 동시 외부연결(6) 제한을 안전하게 지키기 위해 4개씩 분할 조회
+    for (let i = 0; i < slots.length; i += 4) {
+      const chunk = slots.slice(i, i + 4);
+      const settled = await Promise.allSettled(
+        chunk.map(async slot => ({
+          slot,
+          stations: await fetchRoadStationsAtSlot(env, line, slot, force && slot.isLatest)
+        }))
+      );
+      for (const item of settled) {
+        if (item.status === 'fulfilled' && item.value?.stations?.length) {
+          slotResults.push(item.value);
+        }
+      }
+    }
+    const payload = assembleRoadTrendPayload({ line, hours: safeHours, stepMin: 30, slotResults, nowMs });
+    if (payload.times.length > 0) {
+      setCached(cacheKey, payload, 5 * 60000);
+      setCached(staleKey, payload, 60 * 60000);
+      return payload;
+    }
+    const stale = getCached(staleKey);
+    if (stale) return stale;
+    throw new Error('도로기상관측 6시간 추세 자료를 가져오지 못했습니다.');
   });
 }
 
@@ -907,6 +984,24 @@ export default {
         const value = await fetchRoadStations(env, line);
         const res = jsonResponse(request, env, 200, value, { 'Cache-Control': 'public, max-age=60, s-maxage=90' });
         putEdgeCache(ctx, cacheKeyReq, res);
+        return res;
+      } catch (e) {
+        return jsonResponse(request, env, 502, { error: errMessage(e) });
+      }
+    }
+
+    if (pathname === '/api/road-obs-trend') {
+      if (!getRoadKey(env)) {
+        return jsonResponse(request, env, 503, { code: 'ROAD_KEY_MISSING', error: '도로기상관측 API 키가 설정되지 않았습니다.' });
+      }
+      const line = requestUrl.searchParams.get('line') || roadLine;
+      const hours = Number(requestUrl.searchParams.get('hours')) || 6;
+      try {
+        const value = await fetchRoadStationsTrend(env, line, hours, isForced);
+        const res = jsonResponse(request, env, 200, value, {
+          'Cache-Control': isForced ? 'no-store' : 'public, max-age=300, s-maxage=600, stale-while-revalidate=300'
+        });
+        if (!isForced) putEdgeCache(ctx, cacheKeyReq, res);
         return res;
       } catch (e) {
         return jsonResponse(request, env, 502, { error: errMessage(e) });
