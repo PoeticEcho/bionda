@@ -610,7 +610,15 @@ async function buildRwisPayload(env) {
     }
   }
 
-  const { data: conzones } = await withCache('rwis:conzones:v1', CACHE_TTL.conzone, false, () => fetchConzones(env));
+  // 구간(conzone) 목록은 Map 이라 그대로 캐시에 넣으면 JSON 직렬화에서 {} 로 깨어집니다.
+  // (엣지 캐시에서 되살아난 값에 .get 이 없어 'conzones.get is not a function' 으로 죽던 원인)
+  // 캐시에는 [id, conzone] 배열로만 넣고, 읽을 때 Map 으로 되살립니다.
+  const { data: conzoneRows } = await withCache('rwis:conzones:v2', CACHE_TTL.conzone, false, async () =>
+    [...(await fetchConzones(env)).entries()]
+  );
+  const conzones = conzoneRows instanceof Map
+    ? conzoneRows
+    : new Map(Array.isArray(conzoneRows) ? conzoneRows : []);
 
   const wantedLinks = new Set();
   for (const def of zoneDefs) {
