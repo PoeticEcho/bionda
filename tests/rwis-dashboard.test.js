@@ -36,7 +36,7 @@ function pointInPoly(px, py, rings) {
   });
 }
 
-test('net-health: API 호출이 30분 이상 누적 실패 시 통합인증 로그인 알림을 띄우고, 복구 시 즉시 해제하며 절전 공백 오알람을 방지한다', async () => {
+test('net-health: 10분 이상 API 연속 실패 또는 실시간 데이터 미갱신 시 통합인증·인터넷 확인 팝업을 띄우고, 복구 시 즉시 해제한다', async () => {
   const {
     recordApiFailure,
     recordApiSuccess,
@@ -52,32 +52,39 @@ test('net-health: API 호출이 30분 이상 누적 실패 시 통합인증 로�
   let st = recordApiFailure('rwis', 'Failed to fetch', t0, storage);
   assert.equal(evaluateAuthAlert(st, t0).shouldAlert, false);
 
-  // 04:10 ~ 04:30 (25분 경과) -> 아직 30분 미만
-  for (let m = 5; m <= 25; m += 5) {
-    st = recordApiFailure('rwis', 'Failed to fetch', t0 + m * 60000, storage);
-  }
-  assert.equal(evaluateAuthAlert(st, t0 + 29 * 60000).shouldAlert, false);
+  // 04:10 (5분 경과) -> 아직 10분 미만
+  st = recordApiFailure('rwis', 'Failed to fetch', t0 + 5 * 60000, storage);
+  assert.equal(evaluateAuthAlert(st, t0 + 9 * 60000).shouldAlert, false);
 
-  // 04:35 (30분 경과, 연속 7회 실패) -> 중앙 통합인증 로그인 알림 발동!
-  st = recordApiFailure('rwis', 'HTTP 502', t0 + 30 * 60000, storage);
-  const v30 = evaluateAuthAlert(st, t0 + 30 * 60000);
-  assert.equal(v30.shouldAlert, true);
-  assert.equal(v30.elapsedMinutes, 30);
+  // 04:15 (10분 경과, 연속 3회 실패) -> 통합인증·인터넷 접속 확인 팝업 발동!
+  st = recordApiFailure('rwis', 'HTTP 502', t0 + 10 * 60000, storage);
+  const v10 = evaluateAuthAlert(st, t0 + 10 * 60000);
+  assert.equal(v10.shouldAlert, true);
+  assert.equal(v10.reason, 'api-failure');
+  assert.equal(v10.elapsedMinutes, 10);
 
   // 10분 스누즈 -> 5분 뒤에는 숨김, 10분 뒤에는 재표출
-  snoozeNetHealthAlert(t0 + 30 * 60000, 10 * 60000, storage);
+  snoozeNetHealthAlert(t0 + 10 * 60000, 10 * 60000, storage);
   st = readNetHealthState(storage);
-  assert.equal(evaluateAuthAlert(st, t0 + 35 * 60000).shouldAlert, false);
-  assert.equal(evaluateAuthAlert(st, t0 + 40 * 60000).shouldAlert, true);
+  assert.equal(evaluateAuthAlert(st, t0 + 15 * 60000).shouldAlert, false);
+  assert.equal(evaluateAuthAlert(st, t0 + 20 * 60000).shouldAlert, true);
 
   // 25분 절전 공백 후 재실행 -> 과거 실패 기록으로 오알람 방지
-  assert.equal(evaluateAuthAlert(st, t0 + 55 * 60000).shouldAlert, false);
+  assert.equal(evaluateAuthAlert(st, t0 + 36 * 60000).shouldAlert, false);
 
   // 정상 수신 복구 시 즉시 초기화 및 알림 해제
-  st = recordApiSuccess('rwis', t0 + 32 * 60000, storage);
+  st = recordApiSuccess('rwis', t0 + 12 * 60000, storage);
   assert.equal(st.consecutiveFailures, 0);
   assert.equal(st.firstFailedAtMs, null);
-  assert.equal(evaluateAuthAlert(st, t0 + 32 * 60000).shouldAlert, false);
+  assert.equal(evaluateAuthAlert(st, t0 + 12 * 60000).shouldAlert, false);
+
+  // 실시간 데이터 미갱신(10분 경과) 감지: 최초 90초 로딩 유예 중에는 숨김, 유예 이후 10분 경과 시 data-stale 팝업!
+  const staleCheckBoot = evaluateAuthAlert(st, t0 + 23 * 60000, { sessionStartMs: t0 + 22.5 * 60000 });
+  assert.equal(staleCheckBoot.shouldAlert, false);
+  const staleCheckLive = evaluateAuthAlert(st, t0 + 23 * 60000, { sessionStartMs: t0 + 12 * 60000 });
+  assert.equal(staleCheckLive.shouldAlert, true);
+  assert.equal(staleCheckLive.reason, 'data-stale');
+  assert.equal(staleCheckLive.elapsedMinutes, 11);
 });
 
 test('rwis-data: 4개 광역 지명(전북·경남·경북·대구)과 5개 핵심 시·군 지명(함양군·거창군·합천군·고령군·달성군)이 실제 통계청 경계 폴리곤 내부에 정확히 위치한다', async () => {
@@ -353,4 +360,41 @@ test('특이사항 속보: 6시간 이내 영하/강수/겹침 및 24시간 이�
   assert.ok(cardsUrgent.some(c => c.category === 'overlap-6h' && c.tone === 'crit'));
   assert.ok(cardsUrgent.some(c => c.category === 'wet-6h'));
   assert.ok(cardsUrgent.some(c => c.category === 'freeze-6h'));
+});
+
+test('P1 실측 예비살포 속보 카드 및 #38dbf8 안전 색상 통일을 검증한다', async () => {
+  const { evaluateMeasuredPresaltAlerts, buildSpecialBulletinCards } = await import('../public/rwis-data.js');
+  const { classifySeverityTier } = await import('../public/ice.js');
+
+  // 1) 평온 건조 상태에서는 예비살포 카드 미발생
+  const dryRes = evaluateMeasuredPresaltAlerts({
+    roadStations: [
+      { stnId: '14206', name: '함양(도)', roadTemp: 11.2, temp: 7.0, surfaceCode: 1, surfaceState: '건조' },
+      { stnId: '14407', name: '번암교(도)', roadTemp: 8.0, temp: 5.5, surfaceCode: 1, surfaceState: '건조' }
+    ]
+  });
+  assert.equal(dryRes.corridorHits.length, 0);
+  assert.equal(dryRes.westLeadHits.length, 0);
+
+  // 2) 관할(95~176k) 죽산천교 + 서쪽 선행(50~86k) 번암교 실측 예비살포 조건 도달 시 각각 최우선 속보 카드 생성
+  const cards = buildSpecialBulletinCards({
+    roadStations: [
+      { stnId: '14409', name: '죽산천교(도)', roadTemp: 1.4, temp: 3.2, surfaceCode: 2, surfaceState: '습윤' },
+      { stnId: '14407', name: '번암교(도)', roadTemp: 0.9, temp: 2.8, surfaceCode: 2, surfaceState: '습윤' }
+    ]
+  });
+  const corCard = cards.find(c => c.category === 'measured-presalt');
+  const westCard = cards.find(c => c.category === 'measured-presalt-west');
+  assert.ok(corCard, '관할 구간 실측 예비살포 카드가 생성되어야 함');
+  assert.ok(corCard.title.includes('죽산천교'));
+  assert.ok(westCard, '서쪽 선행구간(50~86k) 예비살포 카드가 생성되어야 함');
+  assert.ok(westCard.detail.includes('번암교'));
+
+  // 3) 안전/평온 색상 #38dbf8 통일 검증
+  const calmTier = classifySeverityTier({});
+  assert.equal(calmTier.pinColor, '#38dbf8');
+  const rwisJs = fs.readFileSync(path.join(__dirname, '..', 'public', 'rwis.js'), 'utf8');
+  assert.ok(rwisJs.includes("['#38dbf8'"), 'rwis.js LEVEL_COLORS[0]이 #38dbf8이어야 함');
+  const stylesCss = fs.readFileSync(path.join(__dirname, '..', 'public', 'styles.css'), 'utf8');
+  assert.ok(stylesCss.includes('.dot-calm { background: #38dbf8; }'), 'styles.css .dot-calm이 #38dbf8이어야 함');
 });
