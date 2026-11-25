@@ -46,6 +46,21 @@ import {
   buildCctvPayload,
   isCctvConfigured
 } from '../lib/cctv-its.js';
+import { handleRwisFetch } from './rwis-worker.js';
+
+/**
+ * /rwis 프리픽스 — 광주대구선 RWIS·CCTV 대시보드 API (cloudflare/rwis-worker.js)
+ *   /rwis              → rwis-worker 의 /
+ *   /rwis/api/status   → rwis-worker 의 /api/status  (기존 bionda /api/* 와 충돌 없음)
+ */
+const RWIS_PREFIX = '/rwis';
+
+function rewriteRwisRequest(request, url) {
+  const stripped = url.pathname.slice(RWIS_PREFIX.length) || '/';
+  const target = new URL(url.toString());
+  target.pathname = stripped.startsWith('/') ? stripped : `/${stripped}`;
+  return new Request(target.toString(), request);
+}
 
 const SHARED_CACHE = new Map();
 const INFLIGHT = new Map();
@@ -677,6 +692,11 @@ export default {
   async fetch(request, env = {}, ctx = null) {
     const requestUrl = new URL(request.url);
     const pathname = requestUrl.pathname;
+
+    // 광주대구선 RWIS·CCTV 대시보드는 /rwis 아래로 위임합니다. (프리픽스 제거 후 전달)
+    if (pathname === RWIS_PREFIX || pathname.startsWith(`${RWIS_PREFIX}/`)) {
+      return handleRwisFetch(rewriteRwisRequest(request, requestUrl), env, ctx);
+    }
 
     if (request.method === 'OPTIONS') {
       if (pathname.startsWith('/api/') || pathname === '/') {

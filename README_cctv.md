@@ -126,3 +126,37 @@ jobs:
 | 칩이 "목록에 없음"으로 표시 | ITS에 그 이름이 없음(개명·폐쇄) → 캐시 새로고침 후 재확인, 팝업의 추천 후보 사용 |
 | 영상만 안 나옴 | 스트림 서버 일시 장애 또는 주소 만료 → 팝업의 **캐시 새로고침 후 다시 시도** |
 | `⚠ HTTP 스트림` 표시 / 영상 차단 | ITS가 `http://` 주소를 줄 때 https 페이지에서 브라우저가 혼합 콘텐츠로 차단 → 새 탭 열기 또는 HTTP 환경 확인 |
+
+---
+
+## 5. `/rwis` — 광주대구선 RWIS·CCTV 대시보드 API (같은 Worker에 통합)
+
+`PoeticEcho/etc/rwis/` 의 대시보드가 쓰는 광주대구선(함양IC~옥포JC) RWIS·CCTV API를
+같은 `bionda` Worker의 **`/rwis` 아래**로 합쳤습니다. 별도 Worker를 하나 더 쓰지 않습니다.
+
+| 파일 | 역할 |
+| --- | --- |
+| `cloudflare/rwis-worker.js` | 광주대구선 RWIS(16개 구간 = 8구간 × 2방향)·CCTV 123대 마스터 API (v2.3.0, 단독 배포도 가능) |
+| `cloudflare/worker.js` | 진입점 맨 앞에서 `/rwis`, `/rwis/*` 를 잡아 프리픽스를 떼고 `handleRwisFetch()` 로 위임 |
+
+| 요청 | 위임 대상 | 설명 |
+| --- | --- | --- |
+| `GET /rwis` | `/` | 안내(JSON) |
+| `GET /rwis/api/status` | `/api/status` | CCTV(123대) + RWIS(16개 구간) 통합 응답 (권장) |
+| `GET /rwis/api/cctv` | `/api/cctv` | ITS 목록 + 123대 마스터 매칭 (15분 캐시) |
+| `GET /rwis/api/rwis` | `/api/rwis` | 도로살얼음(FSM)·가시거리(VIR) 등급 (5분 캐시) |
+| `GET /rwis/api/stream?cctvId=cctv00005751` | `/api/stream` | 로드플러스 HLS 주소 + 스냅샷 (2분 캐시) |
+
+- 프리픽스를 떼고 넘기므로 기존 `bionda` 의 `/api/health`, `/api/cctv`(19지점 관제), `/api/forecast` 등과 **겹치지 않습니다.**
+- `/rwis/*` 는 bionda 자체의 `/api` 요청 한도(IP당 60초) 카운터를 쓰지 않습니다.
+- 환경변수: `ITS_API_KEY`(이미 등록된 것을 그대로 사용), 필요하면 `RWIS_SOURCE_URL`·`RWIS_BASE`·`CCTV_SOURCE_URL` 추가.
+  `RWIS_SOURCE_URL` 이 없으면 기상청 RWIS 3단계 API를 직접 호출합니다(무료 플랜 CPU 한도 주의).
+- 단일 파일 번들(Quick Edit)에도 포함됩니다: `npm run build:worker`
+
+```bash
+curl -s "https://bionda.herego.workers.dev/rwis" | head -20
+curl -s "https://bionda.herego.workers.dev/rwis/api/status" | head -40
+curl -s "https://bionda.herego.workers.dev/rwis/api/cctv" | head -20
+```
+
+테스트: `npm test` (`tests/rwis-route.test.js` 가 `/rwis` 위임·프리픽스 제거·쿼리 전달·기존 `/api/*` 무영향을 확인)
