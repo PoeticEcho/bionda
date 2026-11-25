@@ -197,6 +197,15 @@ test('3개 메인 대시보드(index·hourly·rwis)가 공통 3탭 네비게이�
   assert.ok(rwisHtml.includes('id="short6Matrix"'), '6H 13개소 단기예보 표가 존재해야 함');
   assert.ok(rwisHtml.includes('id="rwisReloadBtn"') && rwisHtml.includes('stamp-refresh-ico'), '실시간 상태 배지에 ↻ 새로고침 버튼이 통합되어야 함');
   assert.ok(rwisHtml.includes('id="rwisBurnInBtn"'), '잔상방지 토글 버튼이 존재해야 함');
+
+  // P2 검증: 3개 대시보드 모두 상단 통합 [● 실시간 ↻] 배지 + 다크 상황실 기본 + 관할 이정 롤오버 title 포함
+  const indexHtml = fs.readFileSync(path.join(pubDir, 'index.html'), 'utf8');
+  const hourlyHtml = fs.readFileSync(path.join(pubDir, 'hourly.html'), 'utf8');
+  assert.ok(indexHtml.includes('id="reloadAll"') && indexHtml.includes('hdr-stamp-pill'), 'index.html 상단에 통합 실시간 새로고침 배지가 있어야 함');
+  assert.ok(hourlyHtml.includes('id="reloadHourlyBtn"') && hourlyHtml.includes('hdr-stamp-pill'), 'hourly.html 상단에 통합 실시간 새로고침 배지가 있어야 함');
+  assert.ok(indexHtml.includes('<body class="dark-mode">') && hourlyHtml.includes('class="hourly-page dark-mode"'), 'index/hourly 기본 다크 상황실 테마가 일치해야 함');
+  assert.ok(indexHtml.includes('title="고령지사 관할 95~176k'), 'index.html에 관할 이정 롤오버 툴팁이 있어야 함');
+  assert.ok(rwisHtml.includes('title="고령지사 관할 95~176k'), 'rwis.html에 관할 이정 롤오버 툴팁이 있어야 함');
 });
 
 test('tv-guard: 1px 부드러운 픽셀이동 궤도(어지러움 방지), ON/OFF 저장, 평시 92%/경보 시 100% 휘도 복귀를 검증한다', async () => {
