@@ -609,4 +609,36 @@ test('도로살얼음상황판 최종 고도화: 7개 RWIS 콜아웃(습도 조�
   const idxS13 = rwisHtml.indexOf('id="toggleShort13Overlay"');
   const idxBig = rwisHtml.indexOf('id="toggleMapBigBtn"');
   assert.ok(idxRoad > 0 && idxS13 > idxRoad && idxBig > idxS13, '[노면온도][13개지역][지도 크게] 순서로 배치되어야 함');
+
+  // 6) RWIS 7개 카드 대각 균형 도킹 배치 (상단좌측 2 · 하단중앙 2 · 상단 1 · 하단우측 2) 검증
+  const dockByShort = Object.fromEntries(CORRIDOR_MAP_STATIONS.map(s => [s.shortName, s.dock]));
+  assert.equal(dockByShort['함양'].row, 'top');
+  assert.equal(dockByShort['죽산천교'].row, 'top');
+  assert.ok(dockByShort['함양'].cx < dockByShort['죽산천교'].cx && dockByShort['죽산천교'].cx < 500, '함양·죽산천교는 상단 좌측 나란히 배치되어야 함');
+  assert.equal(dockByShort['남상졸음'].row, 'bottom');
+  assert.equal(dockByShort['거창휴'].row, 'bottom');
+  assert.ok(dockByShort['남상졸음'].cx < dockByShort['거창휴'].cx, '남상졸음·거창휴는 하단 나란히 배치되어야 함');
+  assert.equal(dockByShort['양전교'].row, 'top');
+  assert.equal(dockByShort['논공휴'].row, 'bottom');
+  assert.equal(dockByShort['논공교'].row, 'bottom');
+  assert.ok(dockByShort['논공휴'].cx < dockByShort['논공교'].cx && dockByShort['논공휴'].cx > 1050, '논공휴·논공교는 하단 우측 나란히 배치되어야 함');
+
+  // 7) SVG 레이어 Z-순서: 지시선(map-leader-underlay)이 노선·시군·13개지역·IC·RWIS 카드보다 하위 레이어로 먼저 그려지는지 검증
+  const rwisJs = fs.readFileSync(path.join(__dirname, '..', 'public', 'rwis.js'), 'utf8');
+  const idxUnderlay = rwisJs.indexOf('class="map-leader-underlay"');
+  const idxCorridor = rwisJs.indexOf('class="corridor-zones"');
+  const idxCounty = rwisJs.indexOf('class="county-labels"');
+  const idxS13Pins = rwisJs.indexOf('class="short13-map-pins"');
+  const idxNodes = rwisJs.indexOf('class="route-nodes"');
+  const idxRwisCards = rwisJs.indexOf('class="road-temp-pins"');
+  assert.ok(
+    idxUnderlay > 0 &&
+    idxUnderlay < idxCorridor &&
+    idxCorridor < idxCounty &&
+    idxCounty < idxS13Pins &&
+    idxS13Pins < idxNodes &&
+    idxNodes < idxRwisCards,
+    '지시선 레이어는 노선 및 모든 라벨·배지·카드 아래에 위치해야 함'
+  );
+  assert.ok(rwisJs.includes('renderKmaIconSvg(iconInfo, 26)'), '13개 지역 배지는 TV용 26px 대형 아이콘을 사용해야 함');
 });
