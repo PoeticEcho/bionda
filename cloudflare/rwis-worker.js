@@ -25,7 +25,7 @@ const VERSION = '2.3.0';
 
 const CACHE_TTL = {
   cctv: 900,      // 15분 — ITS 원본 갱신 주기
-  rwis: 300,      // 5분  — RWIS 위험등급 갱신 주기
+  rwis: 120,      // 2분  — RWIS 5분 슬롯 신속 반영 (스트리밍 파서 경량화 적용)
   stream: 120,    // 2분  — 로드플러스 HLS 주소
   conzone: 21600, // 6시간 — 구간·링크 구성(거의 안 바뀜)
 };

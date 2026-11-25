@@ -566,3 +566,47 @@ test('P3 모듈 분리(snow-directive·minimap), 1시간 단기예보 24h 기본
   assert.equal(computeTargetBrightness({ enabled: true, isAlert: false, isDesktop: true, isLightMode: true }), 1, '라이트모드에서는 회색 음영(brightness 0.92)을 씌우지 않아야 함');
   assert.equal(computeTargetBrightness({ enabled: true, isAlert: false, isDesktop: true, isLightMode: false }), 0.92);
 });
+
+test('도로살얼음상황판 최종 고도화: 7개 RWIS 콜아웃(습도 조건부 괄호)·구간 기준관측소·13개지역 지도 오버레이 토글을 검증한다', async () => {
+  const {
+    CORRIDOR_MAP_STATIONS,
+    SHORT13_MAP_LOCATIONS,
+    SHORT13_ROUTE_ORDER,
+    formatStationBasisLabel,
+    formatRwisCalloutLines
+  } = await import('../public/rwis-data.js');
+
+  // 1) 습도가 있는 일반 관측소: '함양(95k)' / '3.0°' / '노면 5.1° - 건조 (72%)'
+  const stnHamyang = CORRIDOR_MAP_STATIONS.find(s => s.stnId === '14206');
+  const hamLines = formatRwisCalloutLines(stnHamyang, { temp: 3.0, roadTemp: 5.1, humidity: 71.6, surfaceState: '건조' });
+  assert.equal(hamLines.titleLeft, '함양(95k)');
+  assert.equal(hamLines.titleRight, '3.0°');
+  assert.equal(hamLines.subLine, '노면 5.1° - 건조 (72%)');
+
+  // 2) 습도가 없는 교량 결빙관측소: 괄호 완전 생략 ('노면 4.3° - 건조')
+  const stnJuksan = CORRIDOR_MAP_STATIONS.find(s => s.stnId === '14409');
+  const jukLines = formatRwisCalloutLines(stnJuksan, { temp: null, roadTemp: 4.3, humidity: null, surfaceState: '건조' });
+  assert.equal(jukLines.titleLeft, '죽산천교(103k)');
+  assert.equal(jukLines.titleRight, '교량');
+  assert.equal(jukLines.subLine, '노면 4.3° - 건조');
+  assert.ok(!jukLines.subLine.includes('('), '습도 결측 시 괄호가 표시되면 안 됨');
+
+  // 3) 구간 카드 기준 관측소 표기 ('함양(도) 기준' vs '죽산천교 기준')
+  assert.equal(formatStationBasisLabel('함양(도)'), '함양(도) 기준');
+  assert.equal(formatStationBasisLabel('죽산천교(도)'), '죽산천교 기준');
+  assert.equal(formatStationBasisLabel('양전교(도)'), '양전교 기준');
+
+  // 4) 13개 단기예보 지도 위치가 SHORT13_ROUTE_ORDER 13개소와 1:1 일치
+  assert.equal(SHORT13_MAP_LOCATIONS.length, 13);
+  assert.deepEqual(
+    SHORT13_MAP_LOCATIONS.map(x => x.id).sort(),
+    [...SHORT13_ROUTE_ORDER].sort()
+  );
+
+  // 5) rwis.html 상단 툴바 [노면온도][13개지역][지도 크게] 순서 검증
+  const rwisHtml = fs.readFileSync(path.join(__dirname, '..', 'public', 'rwis.html'), 'utf8');
+  const idxRoad = rwisHtml.indexOf('id="toggleRoadTempOverlay"');
+  const idxS13 = rwisHtml.indexOf('id="toggleShort13Overlay"');
+  const idxBig = rwisHtml.indexOf('id="toggleMapBigBtn"');
+  assert.ok(idxRoad > 0 && idxS13 > idxRoad && idxBig > idxS13, '[노면온도][13개지역][지도 크게] 순서로 배치되어야 함');
+});
