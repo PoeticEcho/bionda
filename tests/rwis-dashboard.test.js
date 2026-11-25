@@ -407,3 +407,13 @@ test('P1 실측 예비살포 속보 카드 및 #38dbf8 안전 색상 통일을 �
   const stylesCss = fs.readFileSync(path.join(__dirname, '..', 'public', 'styles.css'), 'utf8');
   assert.ok(stylesCss.includes('.dot-calm { background: #38dbf8; }'), 'styles.css .dot-calm이 #38dbf8이어야 함');
 });
+
+test('P2 hourly formatMdHm은 epoch ms 숫자와 ISO 문자열 모두 KST MM-DD HH:MM으로 정확히 포맷한다', async () => {
+  const { formatMdHm } = await import('../public/hourly.js');
+  // 2026-11-25 17:33 KST === 2026-11-25T08:33:00Z
+  const ms = Date.parse('2026-11-25T08:33:00Z');
+  assert.equal(formatMdHm(ms), '11-25 17:33');
+  assert.equal(formatMdHm(String(ms)), '11-25 17:33');
+  assert.equal(formatMdHm('2026-11-25T17:33:00+09:00'), '11-25 17:33');
+  assert.equal(formatMdHm('2026-11-25T08:33:00Z'), '11-25 17:33');
+});
