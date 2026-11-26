@@ -607,6 +607,31 @@ function parseAnyTimeMs(val) {
   return Date.parse(s);
 }
 
+function withDeadline(promise, timeoutMs, label = '응답 시간 초과') {
+  let timer = null;
+  return Promise.race([
+    Promise.resolve(promise),
+    new Promise((_, reject) => {
+      timer = setTimeout(() => reject(new Error(`${label} (${Math.round(timeoutMs / 1000)}초 초과)`)), timeoutMs);
+    })
+  ]).finally(() => {
+    if (timer) clearTimeout(timer);
+  });
+}
+
+async function readEdgeCachedJson(pathWithQuery) {
+  try {
+    const cache = globalThis.caches?.default;
+    if (!cache) return null;
+    const keyReq = edgeCacheRequest(new URL('https://bionda.pages.dev' + pathWithQuery), false);
+    const hit = await cache.match(keyReq);
+    if (!hit || !hit.ok) return null;
+    return await hit.json();
+  } catch {
+    return null;
+  }
+}
+
 /**
  * STEP 3: 일 2회(08:00 · 18:00 KST) 정시 채널과 호환되는 경량 라이브 브리핑 JSON
  */
@@ -615,10 +640,33 @@ async function buildLiveBriefingPayload(env, { force = false } = {}, ctx = null)
   const edition = resolveBriefingEditionMeta(nowMs);
   const roadLine = getRoadLineCode(env);
   const [roadObsRes, roadRiskRes, short12Res, wrnRes] = await Promise.allSettled([
-    getRoadKey(env) ? fetchRoadStations(env, roadLine, force, ctx) : Promise.resolve(null),
-    getRoadKey(env) ? fetchRoadRisk(env, '012', force) : Promise.resolve(null),
-    getServiceKey(env) ? fetchShortTerm12(env, { force, refreshShort: force, refreshUltra: force }) : Promise.resolve(null),
-    getServiceKey(env) ? fetchWrnNowList(env, force) : Promise.resolve([])
+    getRoadKey(env)
+      ? withDeadline(
+          (!force ? readEdgeCachedJson(`/api/road-obs?line=${encodeURIComponent(roadLine)}`) : Promise.resolve(null))
+            .then(hit => hit || fetchRoadStations(env, roadLine, force, ctx)),
+          6500,
+          '도로관측 조회 지연'
+        )
+      : Promise.resolve(null),
+    getRoadKey(env)
+      ? withDeadline(
+          (!force ? readEdgeCachedJson('/api/road-risk?roadNum=012') : Promise.resolve(null))
+            .then(hit => hit || fetchRoadRisk(env, '012', force)),
+          7500,
+          '012선 위험정보 조회 지연'
+        )
+      : Promise.resolve(null),
+    getServiceKey(env)
+      ? withDeadline(
+          (!force ? readEdgeCachedJson('/api/short-term-12?roster=13') : Promise.resolve(null))
+            .then(hit => hit || fetchShortTerm12(env, { force, refreshShort: force, refreshUltra: force })),
+          11500,
+          '13개소 단기예보 조회 지연'
+        )
+      : Promise.resolve(null),
+    getServiceKey(env)
+      ? withDeadline(fetchWrnNowList(env, force), 6000, '특보 조회 지연')
+      : Promise.resolve([])
   ]);
 
   const roadObs = roadObsRes.status === 'fulfilled' ? roadObsRes.value : null;
@@ -677,6 +725,7 @@ async function buildLiveBriefingPayload(env, { force = false } = {}, ctx = null)
 
 /**
  * STEP 4: 전 데이터 파이프라인 신선도·불변식·시차 통합 진단 엔드포인트 (/api/data-health)
+ * - 모바일·콜드 PoP에서도 단일 Worker 6소켓 경합으로 타임아웃되지 않도록 Edge Cache 우선 재사용 + 파이프라인별 개별 데드라인 적용
  */
 async function buildDataHealthPayload(env, request, { force = false } = {}, ctx = null) {
   const nowMs = Date.now();
@@ -684,11 +733,40 @@ async function buildDataHealthPayload(env, request, { force = false } = {}, ctx 
   const edition = resolveBriefingEditionMeta(nowMs);
 
   const [roadObsRes, roadRiskRes, rwisRes, short12Res, wrnRes] = await Promise.allSettled([
-    getRoadKey(env) ? fetchRoadStations(env, roadLine, force, ctx) : Promise.reject(new Error('ROAD_KEY_MISSING')),
-    getRoadKey(env) ? fetchRoadRisk(env, '012', force) : Promise.reject(new Error('ROAD_KEY_MISSING')),
-    handleRwisFetch(new Request(`https://bionda.pages.dev/api/rwis${force ? '?refresh=1' : ''}`), env, ctx).then(r => r.json()),
-    getServiceKey(env) ? fetchShortTerm12(env, { force, refreshShort: force, refreshUltra: force }) : Promise.reject(new Error('SERVICE_KEY_MISSING')),
-    getServiceKey(env) ? fetchWrnNowList(env, force) : Promise.reject(new Error('SERVICE_KEY_MISSING'))
+    getRoadKey(env)
+      ? withDeadline(
+          (!force ? readEdgeCachedJson(`/api/road-obs?line=${encodeURIComponent(roadLine)}`) : Promise.resolve(null))
+            .then(hit => hit || fetchRoadStations(env, roadLine, force, ctx)),
+          6500,
+          '도로관측 조회 지연'
+        )
+      : Promise.reject(new Error('ROAD_KEY_MISSING')),
+    getRoadKey(env)
+      ? withDeadline(
+          (!force ? readEdgeCachedJson('/api/road-risk?roadNum=012') : Promise.resolve(null))
+            .then(hit => hit || fetchRoadRisk(env, '012', force)),
+          7500,
+          '012선 위험정보 조회 지연'
+        )
+      : Promise.reject(new Error('ROAD_KEY_MISSING')),
+    withDeadline(
+      handleRwisFetch(new Request(`https://bionda.pages.dev/api/rwis${force ? '?refresh=1' : ''}`), env, ctx).then(r => r.json()),
+      8000,
+      'RWIS 조회 지연'
+    ),
+    getServiceKey(env)
+      ? withDeadline(
+          (!force
+            ? readEdgeCachedJson('/api/short-term-12?roster=13').then(hit => hit || readEdgeCachedJson('/api/short-term-12'))
+            : Promise.resolve(null)
+          ).then(hit => hit || fetchShortTerm12(env, { force, refreshShort: false, refreshUltra: force })),
+          11500,
+          '13개소 단기예보 조회 지연'
+        )
+      : Promise.reject(new Error('SERVICE_KEY_MISSING')),
+    getServiceKey(env)
+      ? withDeadline(fetchWrnNowList(env, force), 6000, '특보 조회 지연')
+      : Promise.reject(new Error('SERVICE_KEY_MISSING'))
   ]);
 
   const ageMinOf = raw => {

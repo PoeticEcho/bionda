@@ -71,6 +71,9 @@
   - `STEP 3`: GitHub Actions 정시 큐 병목 회피(`08:13` / `18:04` KST), `publish-share.py` `force=1` 및 `public/api/briefing.json` 동시 갱신, `/api/briefing` Edge 캐시 엔드포인트 추가.
   - `STEP 4`: `/api/data-health` + `/diagnostics.html` 구축 및 메인 상황판 카드 `실측` / `모델` 원천 배지 명확화.
   - `STEP 5`: `/api/road-obs-history` + `/history-72h.html` 구축 (72시간 수동 분할 조회, 예비·본살포 `T-2h / T=0 / T+2h` 기상 근거 자동 매칭, 엑셀 호환 UTF-8 BOM CSV 다운로드).
+- **모바일 긴급 버그 수정 (`diagnostics.html` `signal timed out` 해소 & `rwis.html` 모바일 `[지도 크게]` 대화면 뷰어 구현)**:
+  - `diagnostics.js` + `worker.js`: 단일 Worker 내 35+개 상류 서브요청·6소켓 동시 경합으로 모바일 콜드 PoP에서 발생하던 `signal timed out`을 원천 차단하기 위해, 프런트엔드를 6개 개별 Edge 캐시 엔드포인트 독립 병렬·점진 렌더링 구조로 전환하고 `/api/data-health`에도 Edge 캐시 우선 재사용 및 파이프라인별 개별 데드라인(`6~11.5s`)을 적용.
+  - `rwis.html` + `rwis.css` + `rwis.js` + `rwis-data.js`: 모바일·태블릿(`<= 1320px`)에서 `[⛶ 지도 크게]` 클릭 시 기존 1열 폭(`390px`) 고정으로 지도가 커지지 않던 버그를 수정하여, `100vw × 100dvh` 전체화면 인터랙티브 지도 뷰어(약 `300%+` 세로 높이 채움 고해상도 슬라이드 · 활성 주의/위험 구간 자동 포커스 · 두 손가락 핀치줌 · 세로 고정 상태용 `↻ 가로한눈에` 90° 회전 보기 · 안드로이드 뒤로가기 제스처 연동)를 구현하고 50인치 TV(`1920×1080`) 무스크롤 규격은 그대로 보존.
 
 ---
 

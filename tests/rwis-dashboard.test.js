@@ -886,3 +886,82 @@ test('STEP 4·5 운영도구(diagnostics.html · history-72h.html) 엄격 CSP �
   assert.ok(csv.includes('관측일시(KST),KMA시각코드,이정(km),관측소ID'));
   assert.ok(csv.includes('예비살포,1조 양전교~고령IC 수용액 살포'));
 });
+
+test('모바일 버그 수정 검증: diagnostics.js 개별 파이프라인 진단 격리 및 rwis-data.js 모바일 [지도 크게] 확대·90도 가로회전 레이아웃을 검증한다', async () => {
+  const {
+    evaluateRoadObsHealth,
+    evaluateRoadRiskHealth,
+    evaluateRwisHealth,
+    evaluateShort13Health,
+    evaluateWarningsHealth,
+    computeBriefingEditionClient
+  } = await import('../public/diagnostics.js');
+  const { computeMobileBigMapLayout } = await import('../public/rwis-data.js');
+
+  const nowMs = Date.parse('2026-11-26T22:25:00+09:00');
+
+  // 1) 독립 진단 페이지: 개별 엔드포인트 평가 (일부 파이프라인 실패 시에도 타 카드가 정상 산출되어야 함)
+  const roOk = evaluateRoadObsHealth({
+    tm1: '202611262223',
+    stations: [
+      { stnId: '14206', roadTemp: 6.7, temp: 6.3 },
+      { stnId: '14409', roadTemp: 6.5, temp: 6.1 }
+    ]
+  }, nowMs);
+  assert.equal(roOk.status, 'healthy');
+  assert.equal(roOk.ageMinutes, 2);
+  assert.equal(roOk.branchStationsActive, 2);
+
+  const rrOk = evaluateRoadRiskHealth({
+    ok: true,
+    sources: { frgTmKst: '2026-11-26T22:20:00+09:00', fogTmKst: '2026-11-26T22:05:00+09:00' },
+    branchSummary: {
+      rangeLabel: '함양IC(95.0k)~옥포JC(176.0k)',
+      maxIce: 2,
+      iceLabel: '주의',
+      total1km: 162,
+      iceCounts: [120, 22, 20, 0],
+      missingIceCount: 0
+    }
+  }, nowMs);
+  assert.equal(rrOk.status, 'healthy');
+  assert.equal(rrOk.invariantOk, true);
+  assert.equal(rrOk.fogLagMinutes, 15);
+
+  const rwOk = evaluateRwisHealth({
+    ok: true,
+    rwis: {
+      tm: { FR: '202611262215', VR: '202611262200' },
+      zones: new Array(16).fill({})
+    }
+  }, nowMs);
+  assert.equal(rwOk.status, 'healthy');
+  assert.equal(rwOk.vrLagMinutes, 15);
+
+  const s13Timeout = evaluateShort13Health({ ok: false, error: '응답 시간 초과 (34초)' }, nowMs);
+  assert.equal(s13Timeout.status, 'critical');
+  assert.ok(s13Timeout.error.includes('34초'));
+
+  const wrnOk = evaluateWarningsHealth(
+    { forecastConfigured: true, roadConfigured: true, cctvConfigured: true },
+    { ok: true, stale: false, totalNational: 3 }
+  );
+  assert.equal(wrnOk.status, 'healthy');
+  assert.equal(wrnOk.nationalActiveCount, 3);
+  assert.equal(computeBriefingEditionClient(nowMs).editionId, '2026-11-26-night');
+
+  // 2) 모바일 세로(390x640) [지도 크게]: 기존 390px 고정 축소 대신 높이 채움 확대(>= 1100px 폭) 적용 검증
+  const portraitPan = computeMobileBigMapLayout({ stageW: 390, stageH: 640, zoom: null, rotated: false });
+  assert.equal(portraitPan.rotated, false);
+  assert.ok(portraitPan.renderW >= 1100, `모바일 크게 보기 폭은 1100px 이상으로 확대되어야 함 (got ${portraitPan.renderW})`);
+  assert.ok(portraitPan.renderH <= 640, `상·하단 RWIS 콜아웃 카드가 잘리지 않도록 높이는 스테이지 이하여야 함 (got ${portraitPan.renderH})`);
+  assert.ok(portraitPan.scalePct >= 280);
+
+  // 3) 모바일 세로(390x640) [↻ 가로한눈에] 90° 회전 모드: 전구간이 회전 박스에 무손실 수용되는지 검증
+  const portraitRot = computeMobileBigMapLayout({ stageW: 390, stageH: 640, rotZoom: 1.0, rotated: true });
+  assert.equal(portraitRot.rotated, true);
+  assert.ok(portraitRot.renderW >= 600, `90도 회전 시 가로 길이가 스테이지 세로(640)를 활용해 600px 이상이어야 함 (got ${portraitRot.renderW})`);
+  assert.equal(portraitRot.sizerW, portraitRot.renderH);
+  assert.equal(portraitRot.sizerH, portraitRot.renderW);
+  assert.ok(portraitRot.sizerW <= 390 && portraitRot.sizerH <= 640, '1배 맞춤 회전 시 세로 화면 안에 전구간이 한눈에 들어와야 함');
+});

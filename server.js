@@ -536,11 +536,18 @@ async function buildDataHealthPayload({ force = false } = {}) {
     const ms = parseAnyMs(raw);
     return Number.isFinite(ms) ? Math.max(0, Math.round((nowMs - ms) / 60000)) : null;
   };
+  const withDeadline = (promise, ms, label = '응답 시간 초과') => {
+    let t = null;
+    return Promise.race([
+      Promise.resolve(promise),
+      new Promise((_, rej) => { t = setTimeout(() => rej(new Error(`${label} (${Math.round(ms / 1000)}초 초과)`)), ms); })
+    ]).finally(() => { if (t) clearTimeout(t); });
+  };
   const [roadObsRes, roadRiskRes, short12Res, wrnRes] = await Promise.allSettled([
-    getRoadKey() ? fetchRoadStations(ROAD_LINE_CODE, force) : Promise.reject(new Error('ROAD_KEY_MISSING')),
-    getRoadKey() ? fetchRoadRisk('012', force) : Promise.reject(new Error('ROAD_KEY_MISSING')),
-    getServiceKey() ? fetchShortTerm12({ force, refreshShort: force, refreshUltra: force }) : Promise.reject(new Error('SERVICE_KEY_MISSING')),
-    getServiceKey() ? fetchWrnNowList(force) : Promise.reject(new Error('SERVICE_KEY_MISSING'))
+    getRoadKey() ? withDeadline(fetchRoadStations(ROAD_LINE_CODE, force), 6500, '도로관측 조회 지연') : Promise.reject(new Error('ROAD_KEY_MISSING')),
+    getRoadKey() ? withDeadline(fetchRoadRisk('012', force), 7500, '012선 위험정보 조회 지연') : Promise.reject(new Error('ROAD_KEY_MISSING')),
+    getServiceKey() ? withDeadline(fetchShortTerm12({ force, refreshShort: false, refreshUltra: force }), 11500, '13개소 단기예보 조회 지연') : Promise.reject(new Error('SERVICE_KEY_MISSING')),
+    getServiceKey() ? withDeadline(fetchWrnNowList(force), 6000, '특보 조회 지연') : Promise.reject(new Error('SERVICE_KEY_MISSING'))
   ]);
 
   const roadObsPipe = (roadObsRes.status === 'fulfilled' && roadObsRes.value?.stations?.length)
