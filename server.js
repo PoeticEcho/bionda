@@ -252,10 +252,15 @@ async function fetchShortTerm12(optionsOrForce = false) {
     const fetchUltraSmart = async (grid) => {
       if (!resolvedUBase) {
         if (!probePromise) {
-          probePromise = fetchWithFallback('getUltraSrtFcst', grid, uBase, 60, refreshUltra).then(res => {
-            resolvedUBase = res.notice ? new Date(uBase.getTime() - 60 * 60000) : uBase;
-            return { firstKey: `${grid.nx},${grid.ny}`, res };
-          });
+          probePromise = fetchWithFallback('getUltraSrtFcst', grid, uBase, 60, refreshUltra)
+            .then(res => {
+              resolvedUBase = res.notice ? new Date(uBase.getTime() - 60 * 60000) : uBase;
+              return { firstKey: `${grid.nx},${grid.ny}`, res };
+            })
+            .catch(err => {
+              probePromise = null;
+              throw err;
+            });
         }
         const probed = await probePromise;
         if (probed.firstKey === `${grid.nx},${grid.ny}`) return probed.res;
@@ -269,24 +274,27 @@ async function fetchShortTerm12(optionsOrForce = false) {
       fetchShort: (grid) => fetchWithFallback('getVilageFcst', grid, sBase, 180, refreshShort),
       fetchUltra: fetchUltraSmart
     });
-    const pendingUltra = resolvedUBase && resolvedUBase.getTime() < uBase.getTime();
-    setCached(cacheKey, payload, pendingUltra ? 45000 : 5 * 60000);
+    const completeRegions = (payload.regions || []).filter(r => Array.isArray(r.hours) && r.hours.length > 0).length;
+    const pendingUltra = !resolvedUBase || resolvedUBase.getTime() < uBase.getTime();
+    const ttlMs = completeRegions < 13 ? 20000 : (pendingUltra ? 45000 : 5 * 60000);
+    setCached(cacheKey, payload, ttlMs);
     return payload;
   });
 }
 
-async function fetchRoadStations(line = ROAD_LINE_CODE) {
+async function fetchRoadStations(line = ROAD_LINE_CODE, bypassCache = false) {
   const key = getRoadKey();
   if (!key) throw new Error('KMA_ROAD_KEY 또는 KMA_SERVICE_KEY 미설정');
   const cacheKey = `road-obs|${line}`;
   const staleKey = `road-obs-last-good|${line}`;
-  const hit = getCached(cacheKey);
+  const hit = !bypassCache ? getCached(cacheKey) : null;
   if (hit) return hit;
 
-  return withInFlight(cacheKey, async () => {
+  return withInFlight(bypassCache ? `${cacheKey}|bypass` : cacheKey, async () => {
     const now = Date.now();
-    const offsetsMinutes = [2, 5, 9];
+    const offsetsMinutes = [1, 2, 3, 5, 8];
     let lastStations = [];
+    let lastTm1 = '';
     for (const off of offsetsMinutes) {
       try {
         const d = kst(now - off * 60000);
@@ -298,16 +306,17 @@ async function fetchRoadStations(line = ROAD_LINE_CODE) {
         u.searchParams.set('disp', '1');
         u.searchParams.set('help', '2');
         u.searchParams.set('authKey', deEncodedKey(key));
-        const r = await fetch(u, { signal: AbortSignal.timeout(5000) });
+        const r = await fetch(u, { signal: AbortSignal.timeout(6500) });
         if (!r.ok) continue;
         const buf = Buffer.from(await r.arrayBuffer());
         const text = new TextDecoder('euc-kr').decode(buf);
         const parsed = parseRoadStations(text);
         if (parsed.length) {
           lastStations = parsed;
+          lastTm1 = tm1;
           if (parsed.some(s => s.temp !== null || s.roadTemp !== null)) {
             const result = { ok: true, line: String(line), tm1, updatedAt: new Date().toISOString(), stations: parsed };
-            setCached(cacheKey, result, 2 * 60000);
+            setCached(cacheKey, result, 45000);
             setCached(staleKey, result, 20 * 60000);
             return result;
           }
@@ -315,12 +324,12 @@ async function fetchRoadStations(line = ROAD_LINE_CODE) {
       } catch {}
     }
     if (lastStations.length) {
-      const result = { ok: true, line: String(line), updatedAt: new Date().toISOString(), stations: lastStations };
-      setCached(cacheKey, result, 60000);
+      const result = { ok: true, line: String(line), tm1: lastTm1, updatedAt: new Date().toISOString(), stations: lastStations };
+      setCached(cacheKey, result, 30000);
       return result;
     }
     const stale = getCached(staleKey);
-    if (stale) return stale;
+    if (stale) return { ...stale, stale: true };
     throw new Error('도로기상관측 자료를 가져오지 못했습니다.');
   });
 }
@@ -470,20 +479,21 @@ async function getObservationForPlace(lat, lon) {
   return out;
 }
 
-async function fetchOverviewBundle({ placesParam = '', line = ROAD_LINE_CODE, roadNum = '012', force = false } = {}) {
+async function fetchOverviewBundle({ placesParam = '', line = ROAD_LINE_CODE, roadNum = '012', force = false, hard = false } = {}) {
   const places = parseOverviewPlacesParam(placesParam);
   if (!places.length) throw new Error('조회할 유효한 국내 좌표가 없습니다.');
   const now = Date.now();
   const sBase = baseShort(now);
   const uBase = baseUltra(now);
   const oBase = baseObservation(now);
+  const bypassBundle = Boolean(force || hard);
   const bundleKey = `bundle|${line}|${roadNum}|${canonicalOverviewPlacesKey(places)}|${timePart(uBase)}|${timePart(sBase)}`;
-  const hit = !force ? getCached(bundleKey) : null;
+  const hit = !bypassBundle ? getCached(bundleKey) : null;
   if (hit) return hit;
 
-  return withInFlight(force ? `${bundleKey}|force` : bundleKey, async () => {
+  return withInFlight(bypassBundle ? `${bundleKey}|force` : bundleKey, async () => {
     const [roadSettled, riskSettled, wrnSettled] = await Promise.allSettled([
-      getRoadKey() ? fetchRoadStations(line) : Promise.resolve(null),
+      getRoadKey() ? fetchRoadStations(line, bypassBundle) : Promise.resolve(null),
       getRoadKey() ? fetchRoadRisk(roadNum) : Promise.resolve(null),
       fetchWrnNowList()
     ]);
@@ -516,10 +526,15 @@ async function fetchOverviewBundle({ placesParam = '', line = ROAD_LINE_CODE, ro
       const fetchBundleUltra = async (grid) => {
         if (!resolvedUBase) {
           if (!ultraProbePromise) {
-            ultraProbePromise = fetchWithFallback('getUltraSrtFcst', grid, uBase, 60).then(res => {
-              resolvedUBase = res.notice ? new Date(uBase.getTime() - 60 * 60000) : uBase;
-              return { firstKey: `${grid.nx},${grid.ny}`, res };
-            });
+            ultraProbePromise = fetchWithFallback('getUltraSrtFcst', grid, uBase, 60, bypassBundle)
+              .then(res => {
+                resolvedUBase = res.notice ? new Date(uBase.getTime() - 60 * 60000) : uBase;
+                return { firstKey: `${grid.nx},${grid.ny}`, res };
+              })
+              .catch(err => {
+                ultraProbePromise = null;
+                throw err;
+              });
           }
           const probed = await ultraProbePromise;
           if (probed.firstKey === `${grid.nx},${grid.ny}`) return probed.res;
@@ -573,11 +588,12 @@ async function fetchOverviewBundle({ placesParam = '', line = ROAD_LINE_CODE, ro
       mode: 'overview-bundle',
       updatedAt: new Date(now).toISOString(),
       roadLine: String(line),
+      roadObsTm: roadData?.tm1 || null,
       roadStations: roadData?.stations || [],
       roadRisk,
       items
     };
-    setCached(bundleKey, payload, 90000);
+    setCached(bundleKey, payload, roadData?.stations?.length ? 45000 : 15000);
     return payload;
   });
 }
@@ -814,13 +830,15 @@ const server = http.createServer(async (req, res) => {
     if (pathname === '/api/overview-bundle') {
       if (!getServiceKey() && !getRoadKey()) return sendJson(res, 503, { code: 'KEY_MISSING', error: '운영자가 기상청 API 키를 등록하지 않았습니다.' });
       try {
-        const isForced = requestUrl.searchParams.get('force') === '1';
+        const isForced = requestUrl.searchParams.get('force') === '1' || requestUrl.searchParams.get('refresh') === '1';
+        const isHard = requestUrl.searchParams.get('hard') === '1';
+        const bypassNow = isForced || isHard;
         const line = requestUrl.searchParams.get('line') || ROAD_LINE_CODE;
         const roadNum = requestUrl.searchParams.get('roadNum') || '012';
         const placesParam = requestUrl.searchParams.get('places') || '';
-        const value = await fetchOverviewBundle({ placesParam, line, roadNum, force: isForced });
+        const value = await fetchOverviewBundle({ placesParam, line, roadNum, force: bypassNow, hard: isHard });
         return sendJson(res, 200, value, {
-          'Cache-Control': isForced ? 'no-store' : 'public, max-age=60, s-maxage=90'
+          'Cache-Control': bypassNow || !value.roadStations?.length ? 'no-store' : 'public, max-age=30, s-maxage=45'
         });
       } catch (e) {
         return sendJson(res, 502, { error: errMessage(e) });
@@ -842,11 +860,12 @@ const server = http.createServer(async (req, res) => {
         const secsToHour = Math.max(5, Math.ceil((3600000 - (nowMs % 3600000)) / 1000));
         const minsPast35 = kstMin < 35 ? (35 - kstMin) * 60 : 3600;
         const expectedUltraIso = isoKst(baseUltra(nowMs));
-        const pendingUltraRelease = value?.sources?.ultraBase && Date.parse(value.sources.ultraBase) < Date.parse(expectedUltraIso);
+        const pendingUltraRelease = !value?.sources?.ultraBase || Date.parse(value.sources.ultraBase) < Date.parse(expectedUltraIso);
+        const completeRegions = (value?.regions || []).filter(r => Array.isArray(r.hours) && r.hours.length > 0).length;
         const capSec = pendingUltraRelease ? 45 : 300;
         const maxAge = Math.min(180, secsToHour, minsPast35, capSec);
         const sMaxAge = Math.min(300, secsToHour, minsPast35, capSec);
-        const bypassAllCache = isForced || refreshShort || refreshUltra;
+        const bypassAllCache = isForced || isHard || refreshShort || refreshUltra || completeRegions < 13;
         return sendJson(res, 200, value, {
           'Cache-Control': bypassAllCache ? 'no-store' : `public, max-age=${maxAge}, s-maxage=${sMaxAge}, stale-while-revalidate=60`
         });
@@ -858,9 +877,11 @@ const server = http.createServer(async (req, res) => {
     if (pathname === '/api/road-obs') {
       if (!getRoadKey()) return sendJson(res, 503, { code: 'ROAD_KEY_MISSING', error: '도로기상관측 API 키가 설정되지 않았습니다.' });
       const line = requestUrl.searchParams.get('line') || ROAD_LINE_CODE;
+      const bypassNow = requestUrl.searchParams.get('force') === '1' || requestUrl.searchParams.get('refresh') === '1' || requestUrl.searchParams.get('hard') === '1';
       try {
-        const value = await fetchRoadStations(line);
-        return sendJson(res, 200, value, { 'Cache-Control': 'public, max-age=60' });
+        const value = await fetchRoadStations(line, bypassNow);
+        const skipCache = bypassNow || Boolean(value?.stale);
+        return sendJson(res, 200, value, { 'Cache-Control': skipCache ? 'no-store' : 'public, max-age=30, s-maxage=45' });
       } catch (e) {
         return sendJson(res, 502, { error: errMessage(e) });
       }

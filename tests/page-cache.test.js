@@ -184,3 +184,62 @@ test('registerManualRefreshClick: 5분 내 2회 이상 클릭 시 강제 즉시�
   assert.equal(cAfterWindow.count, 1);
   assert.equal(cAfterWindow.isHardForce, false);
 });
+
+test('writeSharedRoadObs & refreshObservationWithStations: 양전교 등 도로관측(tm1) 단조 증가 SSOT 동기화로 페이지 간 수치 역전을 원천 차단한다', async () => {
+  const cacheMod = await import(pathToFileURL(path.join(__dirname, '..', 'public', 'page-cache.js')).href);
+  const obsMod = await import(pathToFileURL(path.join(__dirname, '..', 'public', 'observations.js')).href);
+  const { extractRoadObsTm, readSharedRoadObs, writeSharedRoadObs } = cacheMod;
+  const { refreshObservationWithStations } = obsMod;
+
+  const storage = createMockStorage();
+  const nowMs = Date.parse('2026-11-26T11:24:00+09:00');
+
+  const stns1122 = [
+    { stnId: '14209', name: '양전교(도)', tm: '202611261122', time: '2026-11-26T11:22:00+09:00', roadTemp: 7.9, temp: 6.6, humidity: 77, surfaceCode: 1, surfaceState: '건조' }
+  ];
+  const stnsStale1115 = [
+    { stnId: '14209', name: '양전교(도)', tm: '202611261115', time: '2026-11-26T11:15:00+09:00', roadTemp: 7.0, temp: 5.8, humidity: 78, surfaceCode: 1, surfaceState: '건조' }
+  ];
+  const stnsNewer1124 = [
+    { stnId: '14209', name: '양전교(도)', tm: '202611261124', time: '2026-11-26T11:24:00+09:00', roadTemp: 8.1, temp: 6.8, humidity: 76, surfaceCode: 1, surfaceState: '건조' }
+  ];
+
+  assert.equal(extractRoadObsTm(stns1122), '202611261122');
+
+  // 1) 상황판(index.html)이 11:22 최신 관측(양전교 7.9°)을 기록
+  const r1 = writeSharedRoadObs({ line: '14', stations: stns1122, nowMs, storage });
+  assert.equal(r1.tm1, '202611261122');
+  assert.equal(r1.stations[0].roadTemp, 7.9);
+
+  // 2) 타 탭이 지연된 11:15 캐시본(양전교 7.0°)을 덮어쓰려 해도 단조 증가 규칙으로 11:22(7.9°) 보존!
+  const rStale = writeSharedRoadObs({ line: '14', stations: stnsStale1115, nowMs: nowMs + 5000, storage });
+  assert.equal(rStale.tm1, '202611261122');
+  assert.equal(rStale.stations[0].roadTemp, 7.9);
+  assert.equal(readSharedRoadObs({ line: '14', nowMs: nowMs + 5000, storage }).stations[0].roadTemp, 7.9);
+
+  // 3) 11:24 더 최신 관측(8.1°) 수신 시 정상 전진 업데이트
+  const rNewer = writeSharedRoadObs({ line: '14', stations: stnsNewer1124, nowMs: nowMs + 10000, storage });
+  assert.equal(rNewer.tm1, '202611261124');
+  assert.equal(rNewer.stations[0].roadTemp, 8.1);
+
+  // 4) index.html 관심지역 카드·미니맵 관측 객체도 최신 관측소 값으로 동기화되며 과거 값으로는 역전되지 않음
+  const placeObs = {
+    stnId: '14209',
+    name: '양전교(도)',
+    roadStationName: '양전교(도)',
+    time: '2026-11-26T11:15:00+09:00',
+    roadTemp: 7.0,
+    temp: 5.8,
+    humidity: 78,
+    surfaceCode: 1,
+    surfaceState: '건조'
+  };
+  const upgraded = refreshObservationWithStations(placeObs, stns1122);
+  assert.equal(upgraded.roadTemp, 7.9);
+  assert.equal(upgraded.temp, 6.6);
+  assert.equal(upgraded.time, '2026-11-26T11:22:00+09:00');
+
+  const notDowngraded = refreshObservationWithStations(upgraded, stnsStale1115);
+  assert.equal(notDowngraded.roadTemp, 7.9);
+  assert.equal(notDowngraded.temp, 6.6);
+});

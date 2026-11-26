@@ -280,6 +280,7 @@ test('Cloudflare Worker는 CORS·OPTIONS·health·도로관측(중복 Ncst 생�
     assert.equal(bdl.ok, true);
     assert.equal(bdl.mode, 'overview-bundle');
     assert.ok(Array.isArray(bdl.roadStations) && bdl.roadStations.length >= 1);
+    assert.ok(/^\d{12}$/.test(String(bdl.roadObsTm || '')), 'overview-bundle에 roadObsTm 12자리 관측시각 포함');
     assert.equal(bdl.roadRisk?.ok, true);
     assert.equal(bdl.items['35.644,127.910']?.warnings?.[0]?.title, '한파주의보');
     assert.equal(bdl.items['35.644,127.910']?.forecast?.ok, true);
@@ -628,4 +629,59 @@ test('Pages compares Gaya and Yaro when the bound Worker still returns 11 grids'
   batch = merged;
   assert.deepEqual(await (await onRequest(ctx)).json(), merged);
   assert.equal(calls.length, 1);
+});
+
+test('fetchShortTerm12: 첫 격자 초단기예보(probePromise) 일시 실패 시에도 나머지 격자가 연쇄 실패하지 않고 정상 복구된다', async () => {
+  const mod = await import(pathToFileURL(path.join(__dirname, '..', 'cloudflare', 'worker.js')).href);
+  const worker = mod.default;
+  mod.__resetWorkerCaches();
+
+  const env = { KMA_SERVICE_KEY: 'worker-secret-test-key', ROAD_LINE_CODE: '14' };
+  const beforeFetch = global.fetch;
+  const pad = n => String(n).padStart(2, '0');
+  const nowKst = new Date(Date.now() + 9 * 3600000);
+  nowKst.setUTCMinutes(0, 0, 0);
+
+  let ultraCallCount = 0;
+  global.fetch = async (input) => {
+    const u = String(input);
+    const parsedU = new URL(u);
+    const resName = parsedU.pathname.split('/').at(-1);
+    if (resName === 'getUltraSrtFcst') {
+      ultraCallCount++;
+      // 첫 번째 격자(probe)의 현재시각 + 직전시각 폴백 2회를 모두 실패시켜 probePromise reject 유도
+      if (ultraCallCount <= 2) {
+        throw new Error('Simulated first grid ultra timeout');
+      }
+    }
+    const items = [];
+    for (let i = 0; i <= (resName === 'getUltraSrtFcst' ? 6 : 14); i++) {
+      const d = new Date(nowKst.getTime() + i * 3600000);
+      const fcstDate = `${d.getUTCFullYear()}${pad(d.getUTCMonth() + 1)}${pad(d.getUTCDate())}`;
+      const fcstTime = `${pad(d.getUTCHours())}00`;
+      items.push({ fcstDate, fcstTime, category: 'SKY', fcstValue: '1' });
+      items.push({ fcstDate, fcstTime, category: 'PTY', fcstValue: '0' });
+      items.push({ fcstDate, fcstTime, category: 'POP', fcstValue: '0' });
+      items.push({ fcstDate, fcstTime, category: resName === 'getUltraSrtFcst' ? 'RN1' : 'PCP', fcstValue: '강수없음' });
+      items.push({ fcstDate, fcstTime, category: resName === 'getUltraSrtFcst' ? 'T1H' : 'TMP', fcstValue: '9.0' });
+    }
+    return {
+      ok: true,
+      status: 200,
+      text: async () => JSON.stringify({ response: { header: { resultCode: '00', resultMsg: 'OK' }, body: { items: { item: items } } } })
+    };
+  };
+
+  try {
+    const res = await worker.fetch(new Request('https://bionda.pages.dev/api/short-term-12?roster=13&force=1'), env);
+    assert.equal(res.status, 200);
+    const body = await res.json();
+    assert.equal(body.ok, true);
+    assert.equal(body.regions.length, 13);
+    assert.ok(body.sources.ultraBase, '첫 격자 probe 실패 후에도 다음 격자에서 ultraBase 정상 복구');
+    const completeRegions = body.regions.filter(r => Array.isArray(r.hours) && r.hours.length > 0).length;
+    assert.equal(completeRegions, 13, '13개 전 지역 시간별 기온·아이콘 배열 완비');
+  } finally {
+    global.fetch = beforeFetch;
+  }
 });
