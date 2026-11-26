@@ -852,3 +852,99 @@ test('STEP 2 도로위험(012): null(정보 없음) vs 0(안전) 엄격 분리, 
     global.fetch = beforeFetch;
   }
 });
+
+test('STEP 3·4·5: /api/briefing(일 2회 회차 호환), /api/data-health(불변식·파이프라인 진단), /api/road-obs-history(37슬롯 제한·과거 조회)를 검증한다', async () => {
+  const mod = await import(pathToFileURL(path.join(__dirname, '..', 'cloudflare', 'worker.js')).href);
+  const core = await import(pathToFileURL(path.join(__dirname, '..', 'lib', 'bionda-core.js')).href);
+  const worker = mod.default;
+  mod.__resetWorkerCaches();
+
+  // 1) 슬롯 제한 검증: 72h를 한 번에 요청해도 Cloudflare 50 subrequest 한도 보호를 위해 최대 37슬롯 이내로 안전 절삭
+  const nowMs = Date.parse('2026-11-26T21:00:00+09:00');
+  const cappedSlots = core.buildRoadHistoryWindowSlots({ endMs: nowMs, hours: 72, stepMin: 30, nowMs });
+  assert.ok(cappedSlots.length <= 37, `단일 요청 슬롯 수는 37 이하여야 함 (got ${cappedSlots.length})`);
+  assert.equal(core.resolveBriefingEditionMeta(Date.parse('2026-11-26T21:05:00+09:00')).editionId, '2026-11-26-night');
+  assert.equal(core.resolveBriefingEditionMeta(Date.parse('2026-11-26T09:05:00+09:00')).editionId, '2026-11-26-morning');
+
+  const env = { KMA_SERVICE_KEY: 'worker-secret-test-key', ROAD_LINE_CODE: '14' };
+  const beforeFetch = global.fetch;
+  const pad = n => String(n).padStart(2, '0');
+  const kstBase = new Date(Date.now() + 9 * 3600000);
+  kstBase.setUTCMinutes(0, 0, 0);
+
+  global.fetch = async (input) => {
+    const u = String(input);
+    if (u.includes('road_stn_obs.php')) {
+      const sample = [
+        '#START7777',
+        ' 202611262055, 14209, Yangjeon(Road), Route12, Base, 35.7247, 128.2979, 120, 2, 1.4, 28000, 82.0, 0.5, 0.0, 2.2, 210.0, 1.5, 220.0, 2.1, 1015, -999, -999, -999, -999',
+        '#7777END'
+      ].join('\n');
+      return { ok: true, status: 200, arrayBuffer: async () => Buffer.from(sample, 'utf8') };
+    }
+    if (u.includes('road_file_down.php')) {
+      const frgCsv = [
+        'LINK_ID,S_NUM,F_LON,F_LAT,T_LON,T_LAT,B_ICE,FLAG,X_GRID,Y_GRID',
+        '1570030500,1,127.7490,35.5325,127.7500,35.5330,0,1,350,300'
+      ].join('\n');
+      const fogCsv = [
+        'LINK_ID,S_NUM,F_LON,F_LAT,T_LON,T_LAT,FOG,FLAG,X_GRID,Y_GRID',
+        '1570030500,1,127.7490,35.5325,127.7500,35.5330,0,0,350,300'
+      ].join('\n');
+      const zipBuf = makeTestZip([
+        { name: 'RWS/PRODUCT/FRG/202611/26/R012_1KM_FRG_202611261155.csv', content: frgCsv },
+        { name: 'RWS/PRODUCT/FOG/202611/26/R012_1KM_FOG_202611261150.csv', content: fogCsv }
+      ]);
+      return { ok: true, status: 200, arrayBuffer: async () => zipBuf };
+    }
+    if (u.includes('wrn_now_data.php')) {
+      return { ok: true, status: 200, arrayBuffer: async () => Buffer.from('# empty\n', 'utf8') };
+    }
+    if (u.includes('VilageFcstInfoService_2.0/')) {
+      const parsedU = new URL(u);
+      const resName = parsedU.pathname.split('/').at(-1);
+      const items = [];
+      for (let i = 0; i <= (resName === 'getUltraSrtFcst' ? 6 : 14); i++) {
+        const d = new Date(kstBase.getTime() + i * 3600000);
+        const fcstDate = `${d.getUTCFullYear()}${pad(d.getUTCMonth() + 1)}${pad(d.getUTCDate())}`;
+        const fcstTime = `${pad(d.getUTCHours())}00`;
+        items.push({ fcstDate, fcstTime, category: 'SKY', fcstValue: '1' });
+        items.push({ fcstDate, fcstTime, category: 'PTY', fcstValue: '0' });
+        if (resName !== 'getUltraSrtFcst') items.push({ fcstDate, fcstTime, category: 'POP', fcstValue: '10' });
+        items.push({ fcstDate, fcstTime, category: resName === 'getUltraSrtFcst' ? 'RN1' : 'PCP', fcstValue: '강수없음' });
+        items.push({ fcstDate, fcstTime, category: resName === 'getUltraSrtFcst' ? 'T1H' : 'TMP', fcstValue: '3.0' });
+      }
+      return { ok: true, status: 200, text: async () => JSON.stringify({ response: { header: { resultCode: '00' }, body: { items: { item: items } } } }) };
+    }
+    if (u.includes('rwis.kma.go.kr')) {
+      return { ok: true, status: 200, text: async () => '' };
+    }
+    return { ok: false, status: 404, text: async () => 'not found' };
+  };
+
+  try {
+    const histRes = await worker.fetch(new Request('https://bionda.pages.dev/api/road-obs-history?line=14&hours=6&stepMin=60'), env);
+    assert.equal(histRes.status, 200);
+    const hist = await histRes.json();
+    assert.equal(hist.ok, true);
+    assert.ok(hist.stations['14209']);
+    assert.ok(hist.stations['14209'].presalt.includes('예비살포조건(저온습윤)'));
+
+    const brfRes = await worker.fetch(new Request('https://bionda.pages.dev/api/briefing'), env);
+    assert.equal(brfRes.status, 200);
+    const brf = await brfRes.json();
+    assert.equal(brf.schema, 'bionda-briefing-v2');
+    assert.equal(brf.branchRoadRisk.rangeLabel, '함양IC(95.0k)~옥포JC(176.0k)');
+    assert.equal(brf.branchRoadRisk.iceLabel, '안전');
+
+    const dhRes = await worker.fetch(new Request('https://bionda.pages.dev/api/data-health'), env);
+    assert.equal(dhRes.status, 200);
+    const dh = await dhRes.json();
+    assert.equal(dh.ok, true);
+    assert.equal(dh.pipelines.roadRisk012.invariantOk, true);
+    assert.equal(dh.pipelines.roadRisk012.fogLagMinutes, 5);
+    assert.equal(dh.pipelines.shortTerm13.completeRegions, 13);
+  } finally {
+    global.fetch = beforeFetch;
+  }
+});

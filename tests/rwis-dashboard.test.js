@@ -801,3 +801,88 @@ test('한국도로공사 도로살얼음 위험정보 대응방법 변경알림(
   assert.equal(stepClear.shouldPopup, false);
   assert.equal(stepClear.nextAckMap['zone:210'], undefined);
 });
+
+test('STEP 4·5 운영도구(diagnostics.html · history-72h.html) 엄격 CSP 준수 및 72시간 청크 병합 · 예비/본살포 전후 매칭 · UTF-8 BOM CSV 추출을 검증한다', async () => {
+  const pubDir = path.join(__dirname, '..', 'public');
+  for (const fname of ['diagnostics.html', 'history-72h.html']) {
+    const html = fs.readFileSync(path.join(pubDir, fname), 'utf8');
+    const inlineScripts = [...html.matchAll(/<script(?![^>]*\bsrc=)[^>]*>([\s\S]*?)<\/script>/gi)];
+    assert.equal(inlineScripts.length, 0, `${fname}에 인라인 <script>가 없어야 함`);
+  }
+  assert.ok(fs.existsSync(path.join(__dirname, '..', 'docs', 'MAINTENANCE_HISTORY.md')), '유지보수 이력 문서가 보관되어야 함');
+
+  const {
+    mergeHistoryChunks,
+    analyzeSprayEventWindow,
+    buildHistoryCsvContent
+  } = await import('../public/history-72h.js');
+
+  const chunkA = {
+    ok: true,
+    times: ['2026-11-26T00:00:00+09:00', '2026-11-26T01:00:00+09:00', '2026-11-26T02:00:00+09:00'],
+    tm1s: ['202611260000', '202611260100', '202611260200'],
+    stations: {
+      '14209': {
+        name: '양전교(도)', km: 158.2, stationType: '기본', elevation: 120,
+        ta: [3.8, 2.5, 1.2],
+        tr: [3.4, 2.1, 0.8],
+        rh: [72, 79, 86],
+        sc: [1, 2, 2],
+        ss: ['건조', '습윤', '습윤'],
+        rn: [0, 0.2, 0.5],
+        sd: [0, 0, 0],
+        ws: [1.2, 1.5, 1.8],
+        vis: [20000, 15000, 12000],
+        presalt: ['정상', '정상', '예비살포조건(저온습윤)']
+      }
+    }
+  };
+  const chunkB = {
+    ok: true,
+    times: ['2026-11-26T02:00:00+09:00', '2026-11-26T03:00:00+09:00', '2026-11-26T04:00:00+09:00'],
+    tm1s: ['202611260200', '202611260300', '202611260400'],
+    stations: {
+      '14209': {
+        name: '양전교(도)', km: 158.2, stationType: '기본', elevation: 120,
+        ta: [1.2, 0.4, -0.2],
+        tr: [0.8, 0.3, 0.1],
+        rh: [86, 88, 85],
+        sc: [2, 2, 1],
+        ss: ['습윤', '습윤', '건조'],
+        rn: [0.5, 0.6, 0.6],
+        sd: [0, 0, 0],
+        ws: [1.8, 2.0, 1.6],
+        vis: [12000, 11000, 18000],
+        presalt: ['예비살포조건(저온습윤)', '예비살포조건(저온습윤)', '노면저온(≤2℃)']
+      }
+    }
+  };
+
+  // 1) 중복 시각(02:00) 제거 및 5개 연속 시간 슬롯 병합 검증
+  const merged = mergeHistoryChunks([chunkB, chunkA]);
+  assert.equal(merged.slotCount, 5);
+  assert.deepEqual(merged.stations['14209'].tr, [3.4, 2.1, 0.8, 0.3, 0.1]);
+
+  // 2) 예비살포(02:00) 전 2h(00:00: 3.4°C) -> 살포 시점(02:00: 0.8°C) -> 후 2h(04:00: 0.1°C) 자동 매칭 검증
+  const sprayEvent = {
+    id: 'sp-1',
+    kind: '예비살포',
+    timeIso: '2026-11-26T02:05',
+    stnId: 'all',
+    memo: '1조 양전교~고령IC 수용액 살포'
+  };
+  const analysis = analyzeSprayEventWindow({ merged, event: sprayEvent });
+  assert.equal(analysis.matched, true);
+  assert.equal(analysis.stationName, '양전교');
+  assert.equal(analysis.before2h.tr, 3.4);
+  assert.equal(analysis.atSpray.tr, 0.8);
+  assert.equal(analysis.after2h.tr, 0.1);
+  assert.equal(analysis.coolingDelta2h, -2.6);
+  assert.ok(analysis.rationaleSummary.includes('예비살포조건(저온습윤)'));
+
+  // 3) 엑셀 호환 UTF-8 BOM(\uFEFF) 및 근무메모 포함 CSV 생성 검증
+  const csv = buildHistoryCsvContent({ merged, scope: 'branch', sprayEvents: [sprayEvent] });
+  assert.equal(csv.charCodeAt(0), 0xFEFF, '엑셀 한글 호환을 위한 UTF-8 BOM이 선두에 포함되어야 함');
+  assert.ok(csv.includes('관측일시(KST),KMA시각코드,이정(km),관측소ID'));
+  assert.ok(csv.includes('예비살포,1조 양전교~고령IC 수용액 살포'));
+});
