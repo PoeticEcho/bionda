@@ -246,6 +246,23 @@ test('Cloudflare Worker는 CORS·OPTIONS·health·도로관측(중복 Ncst 생�
     assert.equal(vilageAfter, vilageBefore, 'refreshShort=0 시 단기예보 격자 캐시 유지');
     assert.ok(ultraAfter >= ultraBefore + 12, 'refreshUltra=1 시 12격자 초단기예보 강제 재조회');
 
+    // 5분 내 2회+ 클릭(hard=1) 시 단기예보(VilageFcst) 45분 캐시까지 모두 우회하여 원천 재수신
+    const s12Hard = await worker.fetch(new Request('https://bionda-api.workers.dev/api/short-term-12?force=1&hard=1&refreshShort=0&refreshUltra=0'), env);
+    assert.equal(s12Hard.status, 200);
+    assert.equal(s12Hard.headers.get('cache-control'), 'no-store');
+    const vilageHardAfter = hitUrls.filter(u => u.includes('getVilageFcst')).length;
+    assert.ok(vilageHardAfter >= vilageAfter + 12, 'hard=1 시 12격자 단기예보(VilageFcst) 캐시도 즉시 우회 재조회');
+
+    // road-obs 또한 force=1&hard=1 시 메모리 캐시를 우회하여 상류 road_stn_obs.php 즉시 재호출
+    const roadHitsBefore = hitUrls.filter(u => u.includes('road_stn_obs.php')).length;
+    const roadCached = await worker.fetch(new Request('https://bionda-api.workers.dev/api/road-obs?line=14'), env);
+    assert.equal(roadCached.status, 200);
+    assert.equal(hitUrls.filter(u => u.includes('road_stn_obs.php')).length, roadHitsBefore, '일반 재호출은 2분 캐시 적중');
+    const roadHard = await worker.fetch(new Request('https://bionda-api.workers.dev/api/road-obs?line=14&force=1&hard=1'), env);
+    assert.equal(roadHard.status, 200);
+    assert.equal(roadHard.headers.get('cache-control'), 'no-store');
+    assert.ok(hitUrls.filter(u => u.includes('road_stn_obs.php')).length > roadHitsBefore, 'force=1&hard=1 시 상류 도로관측 즉시 재호출');
+
     // Warnings (EUC-KR decoding verification!)
     const wrnRes = await worker.fetch(new Request('https://bionda-api.workers.dev/api/warnings?name=' + encodeURIComponent('거창군남부') + '&lat=35.644&lon=127.910'), env);
     assert.equal(wrnRes.status, 200);
@@ -593,6 +610,19 @@ test('Pages compares Gaya and Yaro when the bound Worker still returns 11 grids'
   point = { ...point, grid: yaro.grid };
   const delayed = await (await onRequest(ctx)).json();
   assert.deepEqual(delayed.regions.find(r => r.id === 'gaya').hours, []);
+
+  calls.length = 0;
+  const normalCtx = {
+    request: new Request('https://bionda.pages.dev/api/short-term-12?roster=13'),
+    env: ctx.env
+  };
+  batch = legacy;
+  point = {
+    ok: true, grid: { nx: 81, ny: 88 }, sources: yaro.sources,
+    hours: [{ time: yaro.hours[0].time, temp: '-11', chance: 80, wet: true, rainMm: 1 }]
+  };
+  const normalRes = await onRequest(normalCtx);
+  assert.ok(String(normalRes.headers.get('cache-control')).includes('max-age=60'), '비강제 가야 보강 응답은 public max-age 캐시 헤더를 유지해야 함');
 
   calls.length = 0;
   batch = merged;

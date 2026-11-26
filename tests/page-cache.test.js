@@ -143,3 +143,44 @@ test('page-cache: 5분 유효 캐시·정시 경계 무효화·스코프 분리�
     backgroundDwellDelayMs: null
   });
 });
+
+test('registerManualRefreshClick: 5분 내 2회 이상 클릭 시 강제 즉시갱신(isHardForce)으로 격상되고 5분 경과 시 초기화된다', async () => {
+  const mod = await import(pathToFileURL(path.join(__dirname, '..', 'public', 'page-cache.js')).href);
+  const {
+    RAPID_REFRESH_WINDOW_MS,
+    registerManualRefreshClick,
+    resetManualRefreshClicks
+  } = mod;
+
+  assert.equal(RAPID_REFRESH_WINDOW_MS, 5 * 60000);
+  const storage = createMockStorage();
+  resetManualRefreshClicks('rwis', storage);
+  resetManualRefreshClicks('hourly', storage);
+
+  const t0 = Date.parse('2026-11-26T11:20:00+09:00');
+
+  // 1회차 클릭 -> 일반 스마트 새로고침
+  const c1 = registerManualRefreshClick('rwis', { nowMs: t0, storage });
+  assert.equal(c1.count, 1);
+  assert.equal(c1.isHardForce, false);
+
+  // 다른 페이지 스코프(hourly)는 독립적으로 1회차로 시작
+  const h1 = registerManualRefreshClick('hourly', { nowMs: t0 + 10000, storage });
+  assert.equal(h1.count, 1);
+  assert.equal(h1.isHardForce, false);
+
+  // 2분 뒤(5분 이내) 2회차 클릭 -> 즉시 강제 원천 갱신(isHardForce = true)
+  const c2 = registerManualRefreshClick('rwis', { nowMs: t0 + 2 * 60000, storage });
+  assert.equal(c2.count, 2);
+  assert.equal(c2.isHardForce, true);
+
+  // 4분 뒤(5분 이내) 3회차 클릭 -> 계속 강제 갱신 유지
+  const c3 = registerManualRefreshClick('rwis', { nowMs: t0 + 4 * 60000, storage });
+  assert.equal(c3.count, 3);
+  assert.equal(c3.isHardForce, true);
+
+  // 마지막 클릭(t0+4m)으로부터 5분 1초 경과(t0+9m01s) -> 이전 이력 만료되어 다시 1회차 일반 새로고침으로 복귀
+  const cAfterWindow = registerManualRefreshClick('rwis', { nowMs: t0 + 9 * 60000 + 1000, storage });
+  assert.equal(cAfterWindow.count, 1);
+  assert.equal(cAfterWindow.isHardForce, false);
+});

@@ -830,12 +830,13 @@ const server = http.createServer(async (req, res) => {
     if (pathname === '/api/short-term-12') {
       if (!getServiceKey()) return sendJson(res, 503, { code: 'KEY_MISSING', error: '운영자가 기상청 예보 API 키를 등록하지 않았습니다.' });
       try {
-        const isForced = requestUrl.searchParams.get('force') === '1';
+        const isForced = requestUrl.searchParams.get('force') === '1' || requestUrl.searchParams.get('refresh') === '1';
+        const isHard = requestUrl.searchParams.get('hard') === '1';
         const rsParam = requestUrl.searchParams.get('refreshShort');
         const ruParam = requestUrl.searchParams.get('refreshUltra');
-        const refreshShort = rsParam !== null ? rsParam === '1' : isForced;
-        const refreshUltra = ruParam !== null ? ruParam === '1' : isForced;
-        const value = await fetchShortTerm12({ force: isForced, refreshShort, refreshUltra });
+        const refreshShort = isHard ? true : (rsParam !== null ? rsParam === '1' : isForced);
+        const refreshUltra = isHard ? true : (ruParam !== null ? ruParam === '1' : isForced);
+        const value = await fetchShortTerm12({ force: isForced || isHard, refreshShort, refreshUltra });
         const nowMs = Date.now();
         const kstMin = kst(nowMs).getUTCMinutes();
         const secsToHour = Math.max(5, Math.ceil((3600000 - (nowMs % 3600000)) / 1000));
@@ -960,17 +961,20 @@ const server = http.createServer(async (req, res) => {
 
     if (pathname === '/api/open-meteo') {
       const endpoint = requestUrl.searchParams.get('endpoint') === 'ensemble' ? 'ensemble' : 'forecast';
+      const bypassOm = requestUrl.searchParams.get('force') === '1' || requestUrl.searchParams.get('hard') === '1';
       const upstream = new URL(endpoint === 'ensemble' ? 'https://ensemble-api.open-meteo.com/v1/ensemble' : 'https://api.open-meteo.com/v1/forecast');
       for (const [k, v] of requestUrl.searchParams.entries()) {
-        if (k !== 'endpoint') upstream.searchParams.set(k, v);
+        if (k !== 'endpoint' && k !== 'force' && k !== 'hard' && k !== 'refresh' && k !== 't') {
+          upstream.searchParams.set(k, v);
+        }
       }
       const cacheKey = `om|${upstream.toString()}`;
       const maxAge = endpoint === 'ensemble' ? 1800 : 180;
       const ttlMs = endpoint === 'ensemble' ? 30 * 60000 : 4 * 60000;
-      const hit = getCached(cacheKey);
+      const hit = !bypassOm ? getCached(cacheKey) : null;
       if (hit) return sendJson(res, 200, hit, { 'Cache-Control': `public, max-age=${maxAge}` });
       try {
-        const data = await withInFlight(cacheKey, async () => {
+        const data = await withInFlight(bypassOm ? `${cacheKey}|bypass` : cacheKey, async () => {
           const r = await fetch(upstream, { signal: AbortSignal.timeout(12000) });
           if (r.status === 429) {
             const err = new Error('Open-Meteo 요청 한도 초과(429)');
@@ -982,7 +986,7 @@ const server = http.createServer(async (req, res) => {
           setCached(cacheKey, parsed, ttlMs);
           return parsed;
         });
-        return sendJson(res, 200, data, { 'Cache-Control': `public, max-age=${maxAge}` });
+        return sendJson(res, 200, data, { 'Cache-Control': bypassOm ? 'no-store' : `public, max-age=${maxAge}` });
       } catch (e) {
         return sendJson(res, e?.status === 429 ? 429 : 502, { error: errMessage(e) });
       }

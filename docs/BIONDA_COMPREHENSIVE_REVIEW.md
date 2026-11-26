@@ -243,5 +243,12 @@ flowchart TD
 - [x] **P3-2. `public/app.js` 핵심 모듈 분리 (`public/snow-directive.js` · `public/minimap.js`)** — 제설 지시·살포시각·특보해제 상태관리 및 노선 미니맵 렌더러 독립 ES 모듈화(`app.js` ~450줄 슬림화)
 - [x] **P3-3. 저장소 루트 미참조 대용량 이미지(`OG.png` 등) 정리 및 사용자 추가 반영**:
   - `1시간 단기예보` 기본 표시 기간 `24시간` 전환 (`public/hourly.html`, `public/hourly.js`, `public/hourly.css` — 1920px 한 화면 24열 표시)
-  - 밝은(라이트) 모드 회색 음영 축소 & 글자 고대비 선명화 (`public/theme.css`, `public/hourly.css`, `public/styles.css`)
+  - 밝은(라이트) 모드 회색 음영 축소 & 글자 고대비 선명화 (`public/theme.css`, `public/hourly.css`, `public/styles.css`, `public/tv-guard.js`)
   - `+2h` 노면·기온 예측 결합 엔진 일출/일몰 상승·하강 반전 기울기 정교화 (`public/rwis-data.js`)
+
+### 🟣 P4 — 최종 점검 완료 항목 & 2단계 수동 새로고침(5분 내 2회+ 즉시 강제 원천 갱신) (✅ 완료)
+- [x] **P4-1. RWIS 노선 지도 플래그십 UX 완성** (`public/rwis.js`, `public/rwis-data.js`, `public/rwis.html` — 7개 관측소 `2·2·1·2` 대각 균형 콜아웃 카드, 지시선 최하위 레이어 `map-leader-underlay`, 13개 지역 `26px 아이콘 + 20px 기온` 고시인성 배지, 하단 8개 구간 기준관측소 표기, 5분 슬롯 시각 일치화)
+- [x] **P4-2. 본문 `3.3.3` [lib/hourly-roster.mjs](file:///c:/Download/bionda/lib/hourly-roster.mjs) 캐시 강등(`no-store`) 해소** — 비강제 요청 시 `public, max-age=60, s-maxage=180, stale-while-revalidate=60` 헤더 보존
+- [x] **P4-3. 전 페이지(`index` · `hourly` · `rwis`) 5분 내 2회 이상 클릭 시 즉시 강제 원천 갱신(`Hard Force Refresh`)** (`public/page-cache.js` `registerManualRefreshClick`, `cloudflare/worker.js`, `server.js`, `public/app.js`, `public/hourly.js`, `public/rwis.js`):
+  - **1회차 클릭**: 로컬 페이지 캐시 초기화 및 경량 스마트 새로고침 (일일 API 쿼터 보호)
+  - **5분 내 2회차 이상 클릭 (`hard=1` / `refresh=1`)**: 진행 중인 요청이 있어도 즉시 선점하여 브라우저·Cloudflare Edge·Worker 메모리 캐시(`VilageFcst` 45분, `012` 위험 9분, `ITS CCTV` 15분, `RWIS` 2분 포함)를 전 구간 우회하고 상단 배지에 `⚡ 강제 실시간 수신 중…` → `⚡ 강제갱신 MM-DD HH:MM` 피드백 표출

@@ -274,16 +274,16 @@ async function fetchWithFallback(env, resource, grid, base, prevMinutes, bypassC
   }
 }
 
-async function forecast(env, lat, lon) {
+async function forecast(env, lat, lon, bypassCache = false) {
   const grid = latlonToGrid(lat, lon);
   if (grid.nx < 1 || grid.nx > 149 || grid.ny < 1 || grid.ny > 253) {
     throw new Error('기상청 예보격자 범위를 벗어난 좌표입니다.');
   }
   const now = Date.now();
   const requests = await Promise.allSettled([
-    fetchWithFallback(env, 'getUltraSrtFcst', grid, baseUltra(now), 60),
-    fetchWithFallback(env, 'getVilageFcst', grid, baseShort(now), 180),
-    fetchWithFallback(env, 'getUltraSrtNcst', grid, baseObservation(now), 60)
+    fetchWithFallback(env, 'getUltraSrtFcst', grid, baseUltra(now), 60, bypassCache),
+    fetchWithFallback(env, 'getVilageFcst', grid, baseShort(now), 180, bypassCache),
+    fetchWithFallback(env, 'getUltraSrtNcst', grid, baseObservation(now), 60, bypassCache)
   ]);
   return buildForecastResult(grid, now, requests);
 }
@@ -466,16 +466,16 @@ async function fetchRoadStationsTrend(env, line = getRoadLineCode(env), hours = 
   });
 }
 
-async function fetchRoadRisk(env, roadNum = '012') {
+async function fetchRoadRisk(env, roadNum = '012', bypassCache = false) {
   const key = getRoadKey(env);
   if (!key) throw new Error('KMA_ROAD_KEY 또는 KMA_SERVICE_KEY 미설정');
   const cleanNum = String(roadNum || '012').replace(/\D/g, '').padStart(3, '0').slice(-3);
   const cacheKey = `road-risk|${cleanNum}`;
   const staleKey = `road-risk-last-good|${cleanNum}`;
-  const hit = getCached(cacheKey);
+  const hit = !bypassCache ? getCached(cacheKey) : null;
   if (hit) return hit;
 
-  return withInFlight(cacheKey, async () => {
+  return withInFlight(bypassCache ? `${cacheKey}|bypass` : cacheKey, async () => {
     const now = Date.now();
     const offsetsMinutes = [5, 10, 15];
     for (const off of offsetsMinutes) {
@@ -510,14 +510,14 @@ async function fetchRoadRisk(env, roadNum = '012') {
   });
 }
 
-async function getObservationForPlace(env, lat, lon) {
+async function getObservationForPlace(env, lat, lon, bypassCache = false) {
   const cacheKey = `obs|${lat.toFixed(3)}|${lon.toFixed(3)}`;
-  const hit = getCached(cacheKey);
+  const hit = !bypassCache ? getCached(cacheKey) : null;
   if (hit) return hit;
 
   let roadMatch = null;
   try {
-    const roadData = await fetchRoadStations(env, getRoadLineCode(env));
+    const roadData = await fetchRoadStations(env, getRoadLineCode(env), bypassCache);
     const m = matchRoadStation(lat, lon, roadData.stations);
     if (m && m.distanceKm <= 28) roadMatch = m;
   } catch {}
@@ -527,11 +527,11 @@ async function getObservationForPlace(env, lat, lon) {
   try {
     const grid = latlonToGrid(lat, lon);
     const ncstBase = baseObservation(Date.now());
-    const cachedNcstItems = getCached(`kma|getUltraSrtNcst|${grid.nx}|${grid.ny}|${datePart(ncstBase)}|${timePart(ncstBase)}`);
+    const cachedNcstItems = !bypassCache ? getCached(`kma|getUltraSrtNcst|${grid.nx}|${grid.ny}|${datePart(ncstBase)}|${timePart(ncstBase)}`) : null;
     const res = cachedNcstItems
       ? { items: cachedNcstItems, base: isoKst(ncstBase) }
       : needsNcstFallback
-        ? await fetchWithFallback(env, 'getUltraSrtNcst', grid, ncstBase, 60)
+        ? await fetchWithFallback(env, 'getUltraSrtNcst', grid, ncstBase, 60, bypassCache)
         : null;
     kmaNcst = parseNcstValues(res, grid);
   } catch {}
@@ -541,18 +541,20 @@ async function getObservationForPlace(env, lat, lon) {
   return out;
 }
 
-async function fetchOverviewBundle(env, { placesParam = '', line = getRoadLineCode(env), roadNum = '012', force = false } = {}) {
+async function fetchOverviewBundle(env, { placesParam = '', line = getRoadLineCode(env), roadNum = '012', force = false, hard = false } = {}) {
   const places = parseOverviewPlacesParam(placesParam);
   if (!places.length) throw new Error('조회할 유효한 국내 좌표가 없습니다.');
   const now = Date.now();
   const sBase = baseShort(now);
   const uBase = baseUltra(now);
   const oBase = baseObservation(now);
+  const bypassBundle = Boolean(force || hard);
+  const bypassHeavy = Boolean(hard);
   const bundleKey = `bundle|${line}|${roadNum}|${canonicalOverviewPlacesKey(places)}|${timePart(uBase)}|${timePart(sBase)}`;
-  const hit = !force ? getCached(bundleKey) : null;
+  const hit = !bypassBundle ? getCached(bundleKey) : null;
   if (hit) return hit;
 
-  return withInFlight(force ? `${bundleKey}|force` : bundleKey, async () => {
+  return withInFlight(bypassHeavy ? `${bundleKey}|hard` : bypassBundle ? `${bundleKey}|force` : bundleKey, async () => {
     const uniqueGrids = new Map();
     for (const p of places) {
       const gk = `${p.grid.nx},${p.grid.ny}`;
@@ -561,9 +563,9 @@ async function fetchOverviewBundle(env, { placesParam = '', line = getRoadLineCo
     const gridEntries = [...uniqueGrids.entries()];
 
     // 1) 도로관측 · 012위험 · 특보 · 첫 번째 격자(ultra probe) 병렬 시작 후 나머지 격자는 2개씩 분할 (Cloudflare 6연결 한도 내 타임아웃 방지)
-    const roadPromise = getRoadKey(env) ? fetchRoadStations(env, line, force).catch(() => null) : Promise.resolve(null);
-    const riskPromise = getRoadKey(env) ? fetchRoadRisk(env, roadNum).catch(() => null) : Promise.resolve(null);
-    const wrnPromise = fetchWrnNowList(env).catch(() => null);
+    const roadPromise = getRoadKey(env) ? fetchRoadStations(env, line, bypassBundle).catch(() => null) : Promise.resolve(null);
+    const riskPromise = getRoadKey(env) ? fetchRoadRisk(env, roadNum, bypassHeavy).catch(() => null) : Promise.resolve(null);
+    const wrnPromise = fetchWrnNowList(env, bypassBundle).catch(() => null);
 
     const gridResults = new Map();
     let forecastPromise = Promise.resolve();
@@ -573,7 +575,7 @@ async function fetchOverviewBundle(env, { placesParam = '', line = getRoadLineCo
       const fetchBundleUltra = async (grid) => {
         if (!resolvedUBase) {
           if (!ultraProbePromise) {
-            ultraProbePromise = fetchWithFallback(env, 'getUltraSrtFcst', grid, uBase, 60).then(res => {
+            ultraProbePromise = fetchWithFallback(env, 'getUltraSrtFcst', grid, uBase, 60, bypassBundle).then(res => {
               resolvedUBase = res.notice ? new Date(uBase.getTime() - 60 * 60000) : uBase;
               return { firstKey: `${grid.nx},${grid.ny}`, res };
             });
@@ -582,7 +584,7 @@ async function fetchOverviewBundle(env, { placesParam = '', line = getRoadLineCo
           if (probed.firstKey === `${grid.nx},${grid.ny}`) return probed.res;
         }
         const activeBase = resolvedUBase || uBase;
-        return { items: await fetchKma(env, 'getUltraSrtFcst', grid, activeBase, 6000), base: isoKst(activeBase) };
+        return { items: await fetchKma(env, 'getUltraSrtFcst', grid, activeBase, 6000, bypassBundle), base: isoKst(activeBase) };
       };
 
       const roadMatchGate = roadPromise.then(roadData => {
@@ -602,11 +604,11 @@ async function fetchOverviewBundle(env, { placesParam = '', line = getRoadLineCo
 
       const runGrid = async ([gk, grid]) => {
         const ncstPromise = roadMatchGate.then(({ gridNeedsNcst }) =>
-          gridNeedsNcst.has(gk) ? fetchWithFallback(env, 'getUltraSrtNcst', grid, oBase, 60) : null
+          gridNeedsNcst.has(gk) ? fetchWithFallback(env, 'getUltraSrtNcst', grid, oBase, 60, bypassBundle) : null
         );
         const requests = await Promise.allSettled([
           fetchBundleUltra(grid),
-          fetchWithFallback(env, 'getVilageFcst', grid, sBase, 180),
+          fetchWithFallback(env, 'getVilageFcst', grid, sBase, 180, bypassHeavy),
           ncstPromise
         ]);
         gridResults.set(gk, requests);
@@ -624,7 +626,7 @@ async function fetchOverviewBundle(env, { placesParam = '', line = getRoadLineCo
     const [roadData, roadRisk, warningResult] = await Promise.all([roadPromise, riskPromise, wrnPromise, forecastPromise]);
     const allWarnings = warningResult || [];
     const hasSubZones = allWarnings.some(w => w.regUpKo && w.regKo !== w.regUpKo);
-    const capPolyMap = hasSubZones ? await getCapPolygonMap() : new Map();
+    const capPolyMap = hasSubZones ? await getCapPolygonMap(bypassHeavy) : new Map();
 
     const placeRoadMatches = new Map();
     for (const p of places) {
@@ -676,14 +678,14 @@ async function fetchOverviewBundle(env, { placesParam = '', line = getRoadLineCo
   });
 }
 
-async function fetchWrnNowList(env) {
+async function fetchWrnNowList(env, bypassCache = false) {
   const key = getServiceKey(env);
   if (!key) return [];
   const cacheKey = 'kma-wrn-now';
   const staleKey = 'kma-wrn-now-last-good';
-  const hit = getCached(cacheKey);
+  const hit = !bypassCache ? getCached(cacheKey) : null;
   if (hit) return hit;
-  return withInFlight(cacheKey, async () => {
+  return withInFlight(bypassCache ? `${cacheKey}|bypass` : cacheKey, async () => {
     try {
       const u = new URL('https://apihub.kma.go.kr/api/typ01/url/wrn_now_data.php');
       u.searchParams.set('fe', 'f');
@@ -713,15 +715,15 @@ async function fetchWrnNowList(env) {
   });
 }
 
-async function fetchCapXml(file = '') {
+async function fetchCapXml(file = '', bypassCache = false) {
   const cleanFile = String(file || '').trim();
   if (cleanFile && !/^KR\.W\d+_\d{12}_[A-Z]{2,6}_\d+_(EN|KR)\.xml$/.test(cleanFile)) {
     throw new Error('유효하지 않은 CAP XML 파일명입니다.');
   }
   const cacheKey = `cap|${cleanFile || 'rss'}`;
-  const hit = getCached(cacheKey);
+  const hit = !bypassCache ? getCached(cacheKey) : null;
   if (hit) return hit;
-  return withInFlight(cacheKey, async () => {
+  return withInFlight((bypassCache && !cleanFile) ? `${cacheKey}|bypass` : cacheKey, async () => {
     const targetUrl = cleanFile
       ? `https://www.weather.go.kr/w/repositary/xml/wrn/xml/${cleanFile}`
       : 'https://www.weather.go.kr/w/rss/cap/warning.do';
@@ -733,14 +735,14 @@ async function fetchCapXml(file = '') {
   });
 }
 
-async function getCapPolygonMap() {
-  const cached = getCached('kma-cap-polygons');
+async function getCapPolygonMap(bypassCache = false) {
+  const cached = !bypassCache ? getCached('kma-cap-polygons') : null;
   if (cached) return cached;
   const polyMap = new Map();
   try {
-    const rssXml = await fetchCapXml('');
+    const rssXml = await fetchCapXml('', bypassCache);
     const links = extractCapLinksFromRss(rssXml, 8);
-    const docs = await Promise.allSettled(links.map(f => fetchCapXml(f)));
+    const docs = await Promise.allSettled(links.map(f => fetchCapXml(f, false)));
     for (const res of docs) {
       if (res.status === 'fulfilled') populateCapPolygons(res.value, polyMap);
     }
@@ -749,13 +751,13 @@ async function getCapPolygonMap() {
   return polyMap;
 }
 
-async function radarImage(env) {
+async function radarImage(env, bypassCache = false) {
   const radarKey = getRadarKey(env);
   if (!radarKey) throw new Error('KMA_RADAR_KEY 미설정');
   const cacheKey = 'radar-visual';
-  const cache = getCached(cacheKey);
+  const cache = !bypassCache ? getCached(cacheKey) : null;
   if (cache) return cache;
-  return withInFlight(cacheKey, async () => {
+  return withInFlight(bypassCache ? `${cacheKey}|bypass` : cacheKey, async () => {
     const u = new URL('https://apihub.kma.go.kr/api/typ03/cgi/rdr/nph-rdr_cmp1_img');
     const p = { cmp: 'HSR', qcd: 'HSLP', obs: 'ECHD', color: 'C4', aws: '0', map: 'HR', grid: '2', legend: '1', size: '800', itv: '5', zoom_level: '0', zoom_x: '0000000', zoom_y: '0000000', gov: '', authKey: deEncodedKey(radarKey) };
     for (const [k, v] of Object.entries(p)) u.searchParams.set(k, v);
@@ -821,7 +823,10 @@ export default {
     }
 
     if (pathname === '/api/cctv') {
-      const refresh = requestUrl.searchParams.get('refresh') === '1' || requestUrl.searchParams.get('refresh') === 'true';
+      const refresh =
+        requestUrl.searchParams.get('refresh') === '1' ||
+        requestUrl.searchParams.get('refresh') === 'true' ||
+        requestUrl.searchParams.get('hard') === '1';
       const cctvCacheKey = 'its-cctv-corridor';
       const cctvEdgeReq = edgeCacheRequest(new URL(requestUrl.origin + '/api/cctv'), false);
       const edgeCache = globalThis.caches?.default || null;
@@ -895,9 +900,11 @@ export default {
       });
     }
 
-    // Check Edge Cache API (normalized radar key unless force / refreshShort / refreshUltra)
-    const isForced = requestUrl.searchParams.get('force') === '1';
-    const bypassEdge = isForced || requestUrl.searchParams.get('refreshShort') === '1' || requestUrl.searchParams.get('refreshUltra') === '1';
+    // Check Edge Cache API (normalized radar key unless force / hard / refresh / refreshShort / refreshUltra)
+    const isForced = requestUrl.searchParams.get('force') === '1' || requestUrl.searchParams.get('refresh') === '1';
+    const isHard = requestUrl.searchParams.get('hard') === '1';
+    const bypassNow = isForced || isHard;
+    const bypassEdge = bypassNow || requestUrl.searchParams.get('refreshShort') === '1' || requestUrl.searchParams.get('refreshUltra') === '1';
     const cacheKeyReq = edgeCacheRequest(requestUrl, pathname === '/api/radar');
     if (!bypassEdge) {
       const edgeHit = await matchEdgeCache(request, env, cacheKeyReq);
@@ -914,11 +921,11 @@ export default {
         return jsonResponse(request, env, 503, { code: 'KEY_MISSING', error: '운영자가 기상청 예보 API 키를 등록하지 않았습니다.' });
       }
       try {
-        const value = await forecast(env, lat, lon);
+        const value = await forecast(env, lat, lon, bypassNow);
         const res = jsonResponse(request, env, 200, value, {
-          'Cache-Control': 'public, max-age=60, s-maxage=300, stale-while-revalidate=600'
+          'Cache-Control': bypassNow ? 'no-store' : 'public, max-age=60, s-maxage=300, stale-while-revalidate=600'
         });
-        putEdgeCache(ctx, cacheKeyReq, res);
+        if (!bypassNow) putEdgeCache(ctx, cacheKeyReq, res);
         return res;
       } catch (e) {
         return jsonResponse(request, env, 502, { error: errMessage(e) });
@@ -933,11 +940,11 @@ export default {
         const line = requestUrl.searchParams.get('line') || roadLine;
         const roadNum = requestUrl.searchParams.get('roadNum') || '012';
         const placesParam = requestUrl.searchParams.get('places') || '';
-        const value = await fetchOverviewBundle(env, { placesParam, line, roadNum, force: isForced });
+        const value = await fetchOverviewBundle(env, { placesParam, line, roadNum, force: bypassNow, hard: isHard });
         const res = jsonResponse(request, env, 200, value, {
-          'Cache-Control': isForced ? 'no-store' : 'public, max-age=60, s-maxage=90'
+          'Cache-Control': bypassNow ? 'no-store' : 'public, max-age=60, s-maxage=90'
         });
-        if (!isForced) putEdgeCache(ctx, cacheKeyReq, res);
+        if (!bypassNow) putEdgeCache(ctx, cacheKeyReq, res);
         return res;
       } catch (e) {
         return jsonResponse(request, env, 502, { error: errMessage(e) });
@@ -951,9 +958,9 @@ export default {
       try {
         const rsParam = requestUrl.searchParams.get('refreshShort');
         const ruParam = requestUrl.searchParams.get('refreshUltra');
-        const refreshShort = rsParam !== null ? rsParam === '1' : isForced;
-        const refreshUltra = ruParam !== null ? ruParam === '1' : isForced;
-        const value = await fetchShortTerm12(env, { force: isForced, refreshShort, refreshUltra });
+        const refreshShort = isHard ? true : (rsParam !== null ? rsParam === '1' : isForced);
+        const refreshUltra = isHard ? true : (ruParam !== null ? ruParam === '1' : isForced);
+        const value = await fetchShortTerm12(env, { force: bypassNow, refreshShort, refreshUltra });
         const nowMs = Date.now();
         const kstMin = kst(nowMs).getUTCMinutes();
         const secsToHour = Math.max(5, Math.ceil((3600000 - (nowMs % 3600000)) / 1000));
@@ -964,7 +971,7 @@ export default {
         const capSec = pendingUltraRelease ? 45 : 300;
         const maxAge = Math.min(180, secsToHour, minsPast35, capSec);
         const sMaxAge = Math.min(300, secsToHour, minsPast35, capSec);
-        const bypassAllCache = isForced || refreshShort || refreshUltra;
+        const bypassAllCache = bypassNow || refreshShort || refreshUltra;
         const res = jsonResponse(request, env, 200, value, {
           'Cache-Control': bypassAllCache ? 'no-store' : `public, max-age=${maxAge}, s-maxage=${sMaxAge}, stale-while-revalidate=60`
         });
@@ -981,9 +988,11 @@ export default {
       }
       const line = requestUrl.searchParams.get('line') || roadLine;
       try {
-        const value = await fetchRoadStations(env, line);
-        const res = jsonResponse(request, env, 200, value, { 'Cache-Control': 'public, max-age=60, s-maxage=90' });
-        putEdgeCache(ctx, cacheKeyReq, res);
+        const value = await fetchRoadStations(env, line, bypassNow);
+        const res = jsonResponse(request, env, 200, value, {
+          'Cache-Control': bypassNow ? 'no-store' : 'public, max-age=60, s-maxage=90'
+        });
+        if (!bypassNow) putEdgeCache(ctx, cacheKeyReq, res);
         return res;
       } catch (e) {
         return jsonResponse(request, env, 502, { error: errMessage(e) });
@@ -997,11 +1006,11 @@ export default {
       const line = requestUrl.searchParams.get('line') || roadLine;
       const hours = Number(requestUrl.searchParams.get('hours')) || 6;
       try {
-        const value = await fetchRoadStationsTrend(env, line, hours, isForced);
+        const value = await fetchRoadStationsTrend(env, line, hours, bypassNow);
         const res = jsonResponse(request, env, 200, value, {
-          'Cache-Control': isForced ? 'no-store' : 'public, max-age=300, s-maxage=600, stale-while-revalidate=300'
+          'Cache-Control': bypassNow ? 'no-store' : 'public, max-age=300, s-maxage=600, stale-while-revalidate=300'
         });
-        if (!isForced) putEdgeCache(ctx, cacheKeyReq, res);
+        if (!bypassNow) putEdgeCache(ctx, cacheKeyReq, res);
         return res;
       } catch (e) {
         return jsonResponse(request, env, 502, { error: errMessage(e) });
@@ -1014,7 +1023,7 @@ export default {
       }
       const roadNum = requestUrl.searchParams.get('roadNum') || '012';
       try {
-        const value = await fetchRoadRisk(env, roadNum);
+        const value = await fetchRoadRisk(env, roadNum, bypassNow);
         const latRaw = requestUrl.searchParams.get('lat');
         const lonRaw = requestUrl.searchParams.get('lon');
         let out = value;
@@ -1024,8 +1033,10 @@ export default {
             out = { ...value, customPlaceRisk: matchStationRiskForCoord(lat, lon, value.stationRisks, null, null, 6) };
           }
         }
-        const res = jsonResponse(request, env, 200, out, { 'Cache-Control': 'public, max-age=480, s-maxage=540' });
-        putEdgeCache(ctx, cacheKeyReq, res);
+        const res = jsonResponse(request, env, 200, out, {
+          'Cache-Control': bypassNow ? 'no-store' : 'public, max-age=480, s-maxage=540'
+        });
+        if (!bypassNow) putEdgeCache(ctx, cacheKeyReq, res);
         return res;
       } catch (e) {
         return jsonResponse(request, env, 502, { error: errMessage(e) });
@@ -1039,9 +1050,11 @@ export default {
         return jsonResponse(request, env, 400, { error: '유효한 국내 위도·경도를 입력해 주세요.' });
       }
       try {
-        const obs = await getObservationForPlace(env, lat, lon);
-        const res = jsonResponse(request, env, 200, obs, { 'Cache-Control': 'public, max-age=60, s-maxage=90' });
-        putEdgeCache(ctx, cacheKeyReq, res);
+        const obs = await getObservationForPlace(env, lat, lon, bypassNow);
+        const res = jsonResponse(request, env, 200, obs, {
+          'Cache-Control': bypassNow ? 'no-store' : 'public, max-age=60, s-maxage=90'
+        });
+        if (!bypassNow) putEdgeCache(ctx, cacheKeyReq, res);
         return res;
       } catch (e) {
         return jsonResponse(request, env, 502, { error: errMessage(e) });
@@ -1051,12 +1064,12 @@ export default {
     if (pathname === '/api/kma-cap') {
       const file = requestUrl.searchParams.get('file') || '';
       try {
-        const xml = await fetchCapXml(file);
+        const xml = await fetchCapXml(file, bypassNow && !file);
         const headers = buildCorsHeaders(request, env);
         headers.set('Content-Type', 'application/xml; charset=utf-8');
-        headers.set('Cache-Control', file ? 'public, max-age=1800, s-maxage=1800' : 'public, max-age=60, s-maxage=60');
+        headers.set('Cache-Control', bypassNow ? 'no-store' : (file ? 'public, max-age=1800, s-maxage=1800' : 'public, max-age=60, s-maxage=60'));
         const res = new Response(request.method === 'HEAD' ? null : xml, { status: 200, headers });
-        putEdgeCache(ctx, cacheKeyReq, res);
+        if (!bypassNow) putEdgeCache(ctx, cacheKeyReq, res);
         return res;
       } catch (e) {
         return jsonResponse(request, env, 502, { error: errMessage(e) });
@@ -1075,11 +1088,11 @@ export default {
         if (placesParam && (!parsedPlaces || !parsedPlaces.length)) {
           return jsonResponse(request, env, 400, { error: '조회할 유효한 국내 좌표가 없습니다.' });
         }
-        const all = await fetchWrnNowList(env);
+        const all = await fetchWrnNowList(env, bypassNow);
         const isStale = Boolean(all._stale);
         const hasSubZones = all.some(w => w.regUpKo && w.regKo !== w.regUpKo);
-        const capPolyMap = (parsedPlaces || name) && hasSubZones ? await getCapPolygonMap() : new Map();
-        const cacheCtrl = isStale ? 'public, max-age=30, s-maxage=30' : 'public, max-age=55, s-maxage=90';
+        const capPolyMap = (parsedPlaces || name) && hasSubZones ? await getCapPolygonMap(isHard) : new Map();
+        const cacheCtrl = bypassNow ? 'no-store' : (isStale ? 'public, max-age=30, s-maxage=30' : 'public, max-age=55, s-maxage=90');
 
         if (parsedPlaces) {
           const items = {};
@@ -1096,7 +1109,7 @@ export default {
             { ok: true, mode: 'batch', warningsConfirmed: Boolean(getServiceKey(env)) && !isStale, updatedAt: new Date().toISOString(), stale: isStale, items, totalNational: all.length },
             { 'Cache-Control': cacheCtrl }
           );
-          if (!isStale) putEdgeCache(ctx, cacheKeyReq, res);
+          if (!isStale && !bypassNow) putEdgeCache(ctx, cacheKeyReq, res);
           return res;
         }
 
@@ -1110,7 +1123,7 @@ export default {
           { ok: true, updatedAt: new Date().toISOString(), stale: isStale, warnings: sortWarnings(matched), totalNational: all.length },
           { 'Cache-Control': cacheCtrl }
         );
-        if (!isStale) putEdgeCache(ctx, cacheKeyReq, res);
+        if (!isStale && !bypassNow) putEdgeCache(ctx, cacheKeyReq, res);
         return res;
       } catch (e) {
         return jsonResponse(request, env, 502, { error: errMessage(e) });
@@ -1121,17 +1134,19 @@ export default {
       const endpoint = requestUrl.searchParams.get('endpoint') === 'ensemble' ? 'ensemble' : 'forecast';
       const upstream = new URL(endpoint === 'ensemble' ? 'https://ensemble-api.open-meteo.com/v1/ensemble' : 'https://api.open-meteo.com/v1/forecast');
       for (const [k, v] of requestUrl.searchParams.entries()) {
-        if (k !== 'endpoint') upstream.searchParams.set(k, v);
+        if (k !== 'endpoint' && k !== 'force' && k !== 'hard' && k !== 'refresh' && k !== 't') {
+          upstream.searchParams.set(k, v);
+        }
       }
       const cacheKey = `om|${upstream.toString()}`;
       const maxAge = endpoint === 'ensemble' ? 1800 : 180;
       const ttlMs = endpoint === 'ensemble' ? 30 * 60000 : 4 * 60000;
-      const hit = getCached(cacheKey);
+      const hit = !bypassNow ? getCached(cacheKey) : null;
       if (hit) {
         return jsonResponse(request, env, 200, hit, { 'Cache-Control': `public, max-age=${maxAge}, s-maxage=${maxAge}` });
       }
       try {
-        const data = await withInFlight(cacheKey, async () => {
+        const data = await withInFlight(bypassNow ? `${cacheKey}|bypass` : cacheKey, async () => {
           const r = await fetchWithTimeout(upstream.toString(), {}, 12000);
           if (r.status === 429) {
             const err = new Error('Open-Meteo 요청 한도 초과(429)');
@@ -1143,8 +1158,10 @@ export default {
           setCached(cacheKey, parsed, ttlMs);
           return parsed;
         });
-        const res = jsonResponse(request, env, 200, data, { 'Cache-Control': `public, max-age=${maxAge}, s-maxage=${maxAge}` });
-        putEdgeCache(ctx, cacheKeyReq, res);
+        const res = jsonResponse(request, env, 200, data, {
+          'Cache-Control': bypassNow ? 'no-store' : `public, max-age=${maxAge}, s-maxage=${maxAge}`
+        });
+        if (!bypassNow) putEdgeCache(ctx, cacheKeyReq, res);
         return res;
       } catch (e) {
         return jsonResponse(request, env, e?.status === 429 ? 429 : 502, { error: errMessage(e) });
@@ -1178,13 +1195,14 @@ export default {
       if (!getRadarKey(env)) {
         return jsonResponse(request, env, 503, { code: 'RADAR_KEY_MISSING', error: '레이더 API 키가 설정되지 않았습니다.' });
       }
+      const radarForce = bypassNow || requestUrl.searchParams.has('t') && isHard;
       try {
-        const x = await radarImage(env);
+        const x = await radarImage(env, radarForce);
         const headers = buildCorsHeaders(request, env);
         headers.set('Content-Type', x.type);
-        headers.set('Cache-Control', 'public, max-age=240, s-maxage=240');
+        headers.set('Cache-Control', radarForce ? 'no-store' : 'public, max-age=240, s-maxage=240');
         const res = new Response(request.method === 'HEAD' ? null : x.bytes, { status: 200, headers });
-        putEdgeCache(ctx, cacheKeyReq, res);
+        if (!radarForce) putEdgeCache(ctx, cacheKeyReq, res);
         return res;
       } catch (e) {
         return jsonResponse(request, env, 502, { error: errMessage(e) });
