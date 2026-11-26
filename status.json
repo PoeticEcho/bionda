@@ -1,10 +1,16 @@
 {
-  "checkedAt": "2026-11-25T19:34:46.762Z",
+  "checkedAt": "2026-11-26T02:26:14.146Z",
   "night": "2026-11-25",
   "received": {
-    "areas": 13,
-    "stations": 20
+    "areas": 8,
+    "stations": 0
   },
-  "errors": [],
+  "errors": [
+    "도로관측 · HTTP 502",
+    "daegaya · HTTP 502",
+    "geochang/namha · HTTP 502",
+    "namsang · 실황 시각 또는 값 누락",
+    "sudong · HTTP 502"
+  ],
   "delayed": []
 }
