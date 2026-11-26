@@ -91,13 +91,15 @@ function setCached(key, value, ms) {
   SHARED_CACHE.set(key, { value, expires: Date.now() + ms });
 }
 
-function withInFlight(key, loader) {
-  if (INFLIGHT.has(key)) return INFLIGHT.get(key);
-  const p = Promise.resolve().then(loader).finally(() => {
-    INFLIGHT.delete(key);
-  });
-  INFLIGHT.set(key, p);
-  return p;
+/**
+ * Cloudflare Workers(workerd, compatibility_date >= 2025)에서는 종료된 요청(Ended Request)이 만든
+ * Promise를 다른 요청에서 await 하면 "This promise was created by a request that has since ended,
+ * so it can never settle" 예외와 함께 해당 isolate가 영구 502 교착에 빠집니다.
+ * 따라서 요청 간 캐싱은 순수 결과값(SHARED_CACHE) 및 Edge Cache(caches.default)만 사용하고,
+ * 미결 Promise 인스턴스는 절대 요청 간에 공유하지 않습니다.
+ */
+function withInFlight(_key, loader) {
+  return Promise.resolve().then(loader);
 }
 
 function allow(ip) {
