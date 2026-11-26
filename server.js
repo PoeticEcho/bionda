@@ -46,6 +46,7 @@ const {
   detectRadarImageType,
   utcFiveMinSlot,
   extractZipTextEntries,
+  parseZipEntryTimestamp,
   parseRoadRiskCsv,
   buildRoadRiskPayload,
   matchStationRiskForCoord,
@@ -188,7 +189,11 @@ async function fetchKma(resource, grid, base, timeout = 5000, bypassCache = fals
         const ttlMs = resource === 'getVilageFcst' ? 45 * 60000 : 5 * 60000;
         const staleTtlMs = resource === 'getVilageFcst' ? 6 * 3600000 : 90 * 60000;
         setCached(cacheKey, items, ttlMs);
-        setCached(staleKey, { items, base: isoKst(base) }, staleTtlMs);
+        const nextIso = isoKst(base);
+        const prevStale = getCached(staleKey);
+        if (!prevStale?.base || Date.parse(nextIso) >= Date.parse(prevStale.base)) {
+          setCached(staleKey, { items, base: nextIso }, staleTtlMs);
+        }
         return items;
       } catch (e) {
         lastErr = e;
@@ -205,6 +210,10 @@ async function fetchWithFallback(resource, grid, base, prevMinutes, bypassCache 
   try { return { items: await fetchKma(resource, grid, base, 5000, bypassCache), base: isoKst(base) }; }
   catch (error) {
     const previous = new Date(base.getTime() - prevMinutes * 60000);
+    const staleFirst = getCached(`kma-stale|${resource}|${grid.nx}|${grid.ny}`);
+    if (staleFirst?.items?.length && staleFirst.base && Date.parse(staleFirst.base) > Date.parse(isoKst(previous))) {
+      return { items: staleFirst.items, base: staleFirst.base, notice: '기상청 일시 지연으로 직전 수신 최신회차 유지', stale: true };
+    }
     try { return { items: await fetchKma(resource, grid, previous, 5000, bypassCache), base: isoKst(previous), notice: '최신 발표분을 가져오지 못해 직전 발표분 사용' }; }
     catch {
       const stale = getCached(`kma-stale|${resource}|${grid.nx}|${grid.ny}`);
@@ -254,7 +263,7 @@ async function fetchShortTerm12(optionsOrForce = false) {
         if (!probePromise) {
           probePromise = fetchWithFallback('getUltraSrtFcst', grid, uBase, 60, refreshUltra)
             .then(res => {
-              resolvedUBase = res.notice ? new Date(uBase.getTime() - 60 * 60000) : uBase;
+              resolvedUBase = res.base === isoKst(uBase) ? uBase : new Date(uBase.getTime() - 60 * 60000);
               return { firstKey: `${grid.nx},${grid.ny}`, res };
             })
             .catch(err => {
@@ -269,14 +278,35 @@ async function fetchShortTerm12(optionsOrForce = false) {
       return { items: await fetchKma('getUltraSrtFcst', grid, activeBase, 6000, refreshUltra), base: isoKst(activeBase) };
     };
 
-    const payload = await collectShortTerm12({
+    let payload = await collectShortTerm12({
       now,
       fetchShort: (grid) => fetchWithFallback('getVilageFcst', grid, sBase, 180, refreshShort),
       fetchUltra: fetchUltraSmart
     });
+    const verifiedKey = `short12-last-verified|h${curHour}`;
+    const lastVerified = getCached(verifiedKey);
+    const curShortMs = Date.parse(payload.sources?.shortBase || '');
+    const prevShortMs = Date.parse(lastVerified?.sources?.shortBase || '');
+    if (!opts.hard && lastVerified && Number.isFinite(prevShortMs) && (!Number.isFinite(curShortMs) || curShortMs < prevShortMs)) {
+      payload = {
+        ...lastVerified,
+        sources: {
+          ...lastVerified.sources,
+          isFallback: true,
+          status: 'stale-preserved',
+          fallbackReason: '상류 지연으로 직전 검증 최신회차 유지'
+        }
+      };
+    }
+
     const completeRegions = (payload.regions || []).filter(r => Array.isArray(r.hours) && r.hours.length > 0).length;
+    const isMixed = Boolean(payload.sources?.mixedGeneration);
+    if (completeRegions >= 13 && !isMixed && payload.sources?.shortBase) {
+      setCached(verifiedKey, payload, 3 * 3600000);
+    }
+    const pendingShort = !payload.sources?.shortBase || Date.parse(payload.sources.shortBase) < Date.parse(isoKst(sBase));
     const pendingUltra = !resolvedUBase || resolvedUBase.getTime() < uBase.getTime();
-    const ttlMs = completeRegions < 13 ? 20000 : (pendingUltra ? 45000 : 5 * 60000);
+    const ttlMs = (completeRegions < 13 || isMixed) ? 20000 : ((pendingShort || pendingUltra) ? 45000 : 5 * 60000);
     setCached(cacheKey, payload, ttlMs);
     return payload;
   });
@@ -406,18 +436,18 @@ async function fetchRoadStationsTrend(line = ROAD_LINE_CODE, hours = 6, force = 
   });
 }
 
-async function fetchRoadRisk(roadNum = '012') {
+async function fetchRoadRisk(roadNum = '012', bypassCache = false) {
   const key = getRoadKey();
   if (!key) throw new Error('KMA_ROAD_KEY 또는 KMA_SERVICE_KEY 미설정');
   const cleanNum = String(roadNum || '012').replace(/\D/g, '').padStart(3, '0').slice(-3);
   const cacheKey = `road-risk|${cleanNum}`;
   const staleKey = `road-risk-last-good|${cleanNum}`;
-  const hit = getCached(cacheKey);
+  const hit = !bypassCache ? getCached(cacheKey) : null;
   if (hit) return hit;
 
-  return withInFlight(cacheKey, async () => {
+  return withInFlight(bypassCache ? `${cacheKey}|bypass` : cacheKey, async () => {
     const now = Date.now();
-    const offsetsMinutes = [5, 10, 15, 20];
+    const offsetsMinutes = [3, 5, 10, 15, 20];
     for (const off of offsetsMinutes) {
       try {
         const { tmUtc, tmKst } = utcFiveMinSlot(now - off * 60000);
@@ -425,7 +455,7 @@ async function fetchRoadRisk(roadNum = '012') {
         u.searchParams.set('tm', tmUtc);
         u.searchParams.set('roadNum', cleanNum);
         u.searchParams.set('authKey', deEncodedKey(key));
-        const r = await fetch(u, { signal: AbortSignal.timeout(6500) });
+        const r = await fetch(u, { signal: AbortSignal.timeout(5500) });
         if (!r.ok) continue;
         const bytes = new Uint8Array(await r.arrayBuffer());
         if (bytes.length < 22 || bytes[0] !== 0x50 || bytes[1] !== 0x4b) continue;
@@ -436,14 +466,26 @@ async function fetchRoadRisk(roadNum = '012') {
         const frgRows = frgEntry ? parseRoadRiskCsv(frgEntry[1]) : [];
         const fogRows = fogEntry ? parseRoadRiskCsv(fogEntry[1]) : [];
         if (!frgRows.length && !fogRows.length) continue;
-        const payload = buildRoadRiskPayload({ roadNum: cleanNum, tmUtc, tmKst, frgRows, fogRows });
-        setCached(cacheKey, payload, 9 * 60000);
+        const frgMeta = frgEntry ? parseZipEntryTimestamp(frgEntry[0]) : null;
+        const fogMeta = fogEntry ? parseZipEntryTimestamp(fogEntry[0]) : null;
+        const payload = buildRoadRiskPayload({
+          roadNum: cleanNum,
+          tmUtc,
+          tmKst,
+          frgTmUtc: frgMeta?.tmUtc || null,
+          frgTmKst: frgMeta?.tmKst || null,
+          fogTmUtc: fogMeta?.tmUtc || null,
+          fogTmKst: fogMeta?.tmKst || null,
+          frgRows,
+          fogRows
+        });
+        setCached(cacheKey, payload, 4 * 60000);
         setCached(staleKey, payload, 25 * 60000);
         return payload;
       } catch {}
     }
     const stale = getCached(staleKey);
-    if (stale) return stale;
+    if (stale) return { ...stale, stale: true, isFallback: true };
     throw new Error('도로 위험기상정보(FRG/FOG) ZIP 자료를 가져오지 못했습니다.');
   });
 }
@@ -859,13 +901,16 @@ const server = http.createServer(async (req, res) => {
         const kstMin = kst(nowMs).getUTCMinutes();
         const secsToHour = Math.max(5, Math.ceil((3600000 - (nowMs % 3600000)) / 1000));
         const minsPast35 = kstMin < 35 ? (35 - kstMin) * 60 : 3600;
+        const expectedShortIso = isoKst(baseShort(nowMs));
         const expectedUltraIso = isoKst(baseUltra(nowMs));
+        const pendingShortRelease = !value?.sources?.shortBase || Date.parse(value.sources.shortBase) < Date.parse(expectedShortIso);
         const pendingUltraRelease = !value?.sources?.ultraBase || Date.parse(value.sources.ultraBase) < Date.parse(expectedUltraIso);
         const completeRegions = (value?.regions || []).filter(r => Array.isArray(r.hours) && r.hours.length > 0).length;
-        const capSec = pendingUltraRelease ? 45 : 300;
+        const isMixed = Boolean(value?.sources?.mixedGeneration);
+        const capSec = (pendingShortRelease || pendingUltraRelease) ? 45 : 300;
         const maxAge = Math.min(180, secsToHour, minsPast35, capSec);
         const sMaxAge = Math.min(300, secsToHour, minsPast35, capSec);
-        const bypassAllCache = isForced || isHard || refreshShort || refreshUltra || completeRegions < 13;
+        const bypassAllCache = isForced || isHard || refreshShort || refreshUltra || completeRegions < 13 || isMixed;
         return sendJson(res, 200, value, {
           'Cache-Control': bypassAllCache ? 'no-store' : `public, max-age=${maxAge}, s-maxage=${sMaxAge}, stale-while-revalidate=60`
         });
@@ -903,18 +948,21 @@ const server = http.createServer(async (req, res) => {
     if (pathname === '/api/road-risk') {
       if (!getRoadKey()) return sendJson(res, 503, { code: 'ROAD_KEY_MISSING', error: '도로 위험기상정보 API 키가 설정되지 않았습니다.' });
       const roadNum = requestUrl.searchParams.get('roadNum') || '012';
+      const bypassNow = requestUrl.searchParams.get('force') === '1' || requestUrl.searchParams.get('refresh') === '1' || requestUrl.searchParams.get('hard') === '1';
       try {
-        const value = await fetchRoadRisk(roadNum);
+        const value = await fetchRoadRisk(roadNum, bypassNow);
+        const skipRiskCache = bypassNow || Boolean(value?.stale);
+        const hdr = { 'Cache-Control': skipRiskCache ? 'no-store' : 'public, max-age=120, s-maxage=210' };
         const latRaw = requestUrl.searchParams.get('lat');
         const lonRaw = requestUrl.searchParams.get('lon');
         if (latRaw !== null && lonRaw !== null) {
           const lat = Number(latRaw), lon = Number(lonRaw);
           if (Number.isFinite(lat) && Number.isFinite(lon)) {
             const customMatch = matchStationRiskForCoord(lat, lon, value.stationRisks, null, null, 6);
-            return sendJson(res, 200, { ...value, customPlaceRisk: customMatch }, { 'Cache-Control': 'public, max-age=480, s-maxage=540' });
+            return sendJson(res, 200, { ...value, customPlaceRisk: customMatch }, hdr);
           }
         }
-        return sendJson(res, 200, value, { 'Cache-Control': 'public, max-age=480, s-maxage=540' });
+        return sendJson(res, 200, value, hdr);
       } catch (e) {
         return sendJson(res, 502, { error: errMessage(e) });
       }

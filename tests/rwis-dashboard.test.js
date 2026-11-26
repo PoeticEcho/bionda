@@ -642,3 +642,162 @@ test('도로살얼음상황판 최종 고도화: 7개 RWIS 콜아웃(습도 조�
   );
   assert.ok(rwisJs.includes('renderKmaIconSvg(iconInfo, 26)'), '13개 지역 배지는 TV용 26px 대형 아이콘을 사용해야 함');
 });
+
+test('한국도로공사 도로살얼음 위험정보 대응방법 변경알림(주의·위험 격상 팝업 문구·점멸·고정식 기상정보·중복알림 방지) 및 결측/안전 분리를 검증한다', async () => {
+  const {
+    evaluateBranchIceEscalations,
+    normalizeIceGrade
+  } = await import('../public/ice-alert-modal.js');
+  const {
+    indexStationRisks,
+    enrichZonesWithBionda,
+    buildSpecialBulletinCards
+  } = await import('../public/rwis-data.js');
+
+  assert.equal(normalizeIceGrade(0), 0);
+  assert.equal(normalizeIceGrade('2'), 2);
+  assert.equal(normalizeIceGrade(null), null);
+  assert.equal(normalizeIceGrade(-999), null);
+
+  // 1) stationRisks 배열(실서버 응답 형태) 정규화 및 결측 시 '정보 없음'(No False Safety) 검증
+  const emptyEnriched = enrichZonesWithBionda({ rwisZones: [], roadStations: [], roadRisk: null });
+  assert.equal(emptyEnriched.zones[0].fsm.missing, true);
+  assert.equal(emptyEnriched.zones[0].fsm.rawMax, null);
+  assert.equal(emptyEnriched.zones[0].fsm.statusLabel, '정보 없음');
+
+  const arrayRoadRisk = {
+    ok: true,
+    tmKst: '2026-11-26T00:05:00+09:00',
+    stationRisks: [
+      { stnId: '14209', name: '양전교(도)', iceLevel: 2, fogLevel: 0 },
+      { stnId: '14407', name: '번암교(도)', iceLevel: 3, fogLevel: 0 } // 서쪽 관할외(72.9k)
+    ]
+  };
+  const idxMap = indexStationRisks(arrayRoadRisk);
+  assert.equal(idxMap.get('14209')?.iceLevel, 2);
+
+  const enrichedFromArray = enrichZonesWithBionda({
+    rwisZones: [],
+    roadStations: [{ stnId: '14209', name: '양전교(도)', roadTemp: 1.3, temp: 2.8, surfaceCode: 2, surfaceState: '습윤' }],
+    roadRisk: arrayRoadRisk
+  });
+  const z210 = enrichedFromArray.zones.find(z => z.suffix === '210'); // 고령IC-동고령IC (양전교)
+  const z160 = enrichedFromArray.zones.find(z => z.suffix === '160'); // 함양IC-함양JC (미수신)
+  assert.equal(z210.fsm.rawMax, 2);
+  assert.equal(z210.fsm.missing, false);
+  assert.equal(z210.fsm.statusLabel, '주의');
+  assert.equal(z160.fsm.missing, true);
+  assert.equal(z160.fsm.statusLabel, '정보 없음');
+
+  // 2) 특이사항 속보 최우선(priority 1~2) KEC 격상 카드 생성 검증
+  const bCards = buildSpecialBulletinCards({
+    roadStations: [{ stnId: '14209', name: '양전교(도)', roadTemp: 1.3, temp: 2.8, surfaceCode: 2, surfaceState: '습윤' }],
+    roadRisk: arrayRoadRisk,
+    enrichedZones: enrichedFromArray.zones
+  });
+  assert.equal(bCards[0].category, 'kec-ice-escalation');
+  assert.ok(bCards[0].title.includes('도로살얼음 위험정보 주의 격상'));
+
+  // 3) KEC 공식 팝업 판정 순수 함수: 평시(0단계) -> 주의(2단계) 격상 -> 확인(Ack) -> 위험(3단계) 재격상 -> 해제(0단계) -> 재격상
+  const roadStations = [
+    { stnId: '14209', name: '양전교(도)', roadTemp: 1.2, temp: 2.6, surfaceCode: 2, surfaceState: '습윤' },
+    { stnId: '14103', name: '논공휴(도)', roadTemp: 6.5, temp: 5.8, surfaceCode: 2, surfaceState: '습윤' } // 영상(>4°C, >2°C) 습윤 오탐 점검 케이스
+  ];
+  const nowMs = Date.parse('2026-11-26T00:05:00+09:00');
+
+  // Step A: 초기 전 구간 안전(0단계) + 관할외(inBranch:false) 위험(3단계) -> 팝업 미발생!
+  const step0 = evaluateBranchIceEscalations({
+    prevLevels: {},
+    ackMap: {},
+    initialized: false,
+    items: [
+      { id: 'zone:210', label: '고령IC ↔ 동고령IC', kmLabel: '152.9~165.5k', inBranch: true, iceLevel: 0, stnIds: ['14209'] },
+      { id: 'zone:230', label: '고령JC ↔ 옥포JC', kmLabel: '167.0~176.0k', inBranch: true, iceLevel: 0, stnIds: ['14103'] },
+      { id: 'stn:14407', label: '번암교', kmLabel: '72.9k', inBranch: false, iceLevel: 3, stnIds: ['14407'] }
+    ],
+    roadStations,
+    tmKst: '2026-11-26T00:00:00+09:00',
+    nowMs
+  });
+  assert.equal(step0.shouldPopup, false);
+  assert.equal(step0.activeAlertIds.length, 0);
+
+  // Step B: 5분 뒤 고령IC↔동고령IC(저온 습윤) + 고령JC↔옥포JC(영상 습윤) 주의(2단계) 격상!
+  const stepCaution = evaluateBranchIceEscalations({
+    prevLevels: step0.nextLevels,
+    ackMap: step0.nextAckMap,
+    initialized: step0.initialized,
+    items: [
+      { id: 'zone:210', label: '고령IC ↔ 동고령IC', kmLabel: '152.9~165.5k', inBranch: true, iceLevel: 2, stnIds: ['14209'] },
+      { id: 'zone:230', label: '고령JC ↔ 옥포JC', kmLabel: '167.0~176.0k', inBranch: true, iceLevel: 2, stnIds: ['14103'] }
+    ],
+    roadStations,
+    tmKst: '2026-11-26T00:05:00+09:00',
+    nowMs
+  });
+  assert.equal(stepCaution.shouldPopup, true);
+  assert.equal(stepCaution.popupLevel, 2);
+  assert.equal(stepCaution.refTimeText, '2026-11-26 00:05');
+  assert.equal(stepCaution.headline, '도로살얼음 위험정보 주의 격상 알림');
+  assert.equal(stepCaution.directive, '온도, 노면상태 확인 후 예비살포');
+  assert.deepEqual(stepCaution.activeAlertIds, ['zone:210', 'zone:230']);
+  // 저온 구간(양전교 1.2°C) vs 영상 습윤 구간(논공휴 6.5°C) 안내 문구 구분 확인
+  const hitCold = stepCaution.triggeredItems.find(x => x.id === 'zone:210');
+  const hitWarm = stepCaution.triggeredItems.find(x => x.id === 'zone:230');
+  assert.equal(hitCold.isColdCondition, true);
+  assert.ok(hitWarm.tempCheckNote.includes('습윤 오탐'));
+
+  // Step C: 사용자가 [확인] 클릭 후 다음 5분 주기에 동일 주의(2단계) 유지 -> 팝업 재표출 안 함, 점멸(activeAlertIds)은 유지!
+  const acked = {
+    'zone:210': { level: 2, atMs: nowMs },
+    'zone:230': { level: 2, atMs: nowMs }
+  };
+  const stepSteady = evaluateBranchIceEscalations({
+    prevLevels: stepCaution.nextLevels,
+    ackMap: acked,
+    initialized: true,
+    items: [
+      { id: 'zone:210', label: '고령IC ↔ 동고령IC', kmLabel: '152.9~165.5k', inBranch: true, iceLevel: 2, stnIds: ['14209'] },
+      { id: 'zone:230', label: '고령JC ↔ 옥포JC', kmLabel: '167.0~176.0k', inBranch: true, iceLevel: 2, stnIds: ['14103'] }
+    ],
+    roadStations,
+    tmKst: '2026-11-26T00:10:00+09:00',
+    nowMs: nowMs + 5 * 60000
+  });
+  assert.equal(stepSteady.shouldPopup, false);
+  assert.deepEqual(stepSteady.activeAlertIds, ['zone:210', 'zone:230']);
+
+  // Step D: 주의(2단계) -> 위험(3단계) 추가 격상 시 즉시 위험 팝업 재발동!
+  const stepDanger = evaluateBranchIceEscalations({
+    prevLevels: stepSteady.nextLevels,
+    ackMap: stepSteady.nextAckMap,
+    initialized: true,
+    items: [
+      { id: 'zone:210', label: '고령IC ↔ 동고령IC', kmLabel: '152.9~165.5k', inBranch: true, iceLevel: 3, stnIds: ['14209'] },
+      { id: 'zone:230', label: '고령JC ↔ 옥포JC', kmLabel: '167.0~176.0k', inBranch: true, iceLevel: 2, stnIds: ['14103'] }
+    ],
+    roadStations,
+    tmKst: '2026-11-26T00:15:00+09:00',
+    nowMs: nowMs + 10 * 60000
+  });
+  assert.equal(stepDanger.shouldPopup, true);
+  assert.equal(stepDanger.popupLevel, 3);
+  assert.equal(stepDanger.headline, '도로살얼음 위험정보 위험 격상 알림');
+  assert.equal(stepDanger.directive, '예비살포 실시');
+  assert.ok(stepDanger.subDirective.includes('선(先)예비살포, 후(後)상황판단회의'));
+
+  // Step E: 안전(0단계) 해제 시 Ack 기록 자동 초기화 -> 이후 다시 주의(2단계) 발생 시 정상 재알림!
+  const stepClear = evaluateBranchIceEscalations({
+    prevLevels: stepDanger.nextLevels,
+    ackMap: { 'zone:210': { level: 3, atMs: nowMs + 10 * 60000 } },
+    initialized: true,
+    items: [
+      { id: 'zone:210', label: '고령IC ↔ 동고령IC', kmLabel: '152.9~165.5k', inBranch: true, iceLevel: 0, stnIds: ['14209'] }
+    ],
+    roadStations,
+    tmKst: '2026-11-26T00:20:00+09:00',
+    nowMs: nowMs + 15 * 60000
+  });
+  assert.equal(stepClear.shouldPopup, false);
+  assert.equal(stepClear.nextAckMap['zone:210'], undefined);
+});

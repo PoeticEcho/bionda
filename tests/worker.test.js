@@ -685,3 +685,170 @@ test('fetchShortTerm12: 첫 격자 초단기예보(probePromise) 일시 실패 �
     global.fetch = beforeFetch;
   }
 });
+
+test('STEP 1 단기예보 세대 무결성: ?force=1 상류 일시 타임아웃 시 kma-stale 최신 회차(17:00)를 우선 보존하고 과거 회차(14:00)로 절대 역행하지 않는다', async () => {
+  const mod = await import(pathToFileURL(path.join(__dirname, '..', 'cloudflare', 'worker.js')).href);
+  const core = await import(pathToFileURL(path.join(__dirname, '..', 'lib', 'bionda-core.js')).href);
+  const worker = mod.default;
+  mod.__resetWorkerCaches();
+
+  // 1) baseShort 11분 안전지연 검증: 17:11 KST -> 17:00 발표 채택, 14:10 KST -> 11:00 유지
+  assert.equal(core.baseShort(Date.parse('2026-11-25T17:11:30+09:00')).getUTCHours(), 17);
+  assert.equal(core.baseShort(Date.parse('2026-11-25T14:10:00+09:00')).getUTCHours(), 11);
+
+  const env = { KMA_SERVICE_KEY: 'worker-secret-test-key', ROAD_LINE_CODE: '14' };
+  const beforeFetch = global.fetch;
+  const pad = n => String(n).padStart(2, '0');
+  const nowKst = new Date(Date.now() + 9 * 3600000);
+  nowKst.setUTCMinutes(0, 0, 0);
+
+  let failLatestShort = false;
+  let latestShortBaseTimeSeen = null;
+  const attemptedShortBaseTimes = [];
+
+  global.fetch = async (input) => {
+    const u = String(input);
+    const parsedU = new URL(u);
+    const resName = parsedU.pathname.split('/').at(-1);
+    const baseTime = parsedU.searchParams.get('base_time');
+    if (resName === 'getVilageFcst') {
+      attemptedShortBaseTimes.push(baseTime);
+      if (!latestShortBaseTimeSeen) latestShortBaseTimeSeen = baseTime;
+      if (failLatestShort && baseTime === latestShortBaseTimeSeen) {
+        throw new Error('Simulated KMA VilageFcst timeout on latest base');
+      }
+    }
+    const items = [];
+    for (let i = 0; i <= (resName === 'getUltraSrtFcst' ? 6 : 14); i++) {
+      const d = new Date(nowKst.getTime() + i * 3600000);
+      const fcstDate = `${d.getUTCFullYear()}${pad(d.getUTCMonth() + 1)}${pad(d.getUTCDate())}`;
+      const fcstTime = `${pad(d.getUTCHours())}00`;
+      items.push({ fcstDate, fcstTime, category: 'SKY', fcstValue: '1' });
+      items.push({ fcstDate, fcstTime, category: 'PTY', fcstValue: '0' });
+      if (resName !== 'getUltraSrtFcst') {
+        items.push({ fcstDate, fcstTime, category: 'POP', fcstValue: '20' });
+      }
+      items.push({ fcstDate, fcstTime, category: resName === 'getUltraSrtFcst' ? 'RN1' : 'PCP', fcstValue: '강수없음' });
+      items.push({ fcstDate, fcstTime, category: resName === 'getUltraSrtFcst' ? 'T1H' : 'TMP', fcstValue: baseTime === latestShortBaseTimeSeen ? '7.0' : '4.0' });
+    }
+    return {
+      ok: true,
+      status: 200,
+      text: async () => JSON.stringify({ response: { header: { resultCode: '00', resultMsg: 'OK' }, body: { items: { item: items } } } })
+    };
+  };
+
+  try {
+    // 1차 호출: 최신 shortBase 정상 수신 및 kma-stale / short12-last-verified 저장
+    const res1 = await worker.fetch(new Request('https://bionda.pages.dev/api/short-term-12?roster=13'), env);
+    assert.equal(res1.status, 200);
+    const body1 = await res1.json();
+    const initialShortBase = body1.sources.shortBase;
+    assert.ok(initialShortBase);
+    assert.equal(body1.sources.mixedGeneration, false);
+    // 초단기 시간대 POP 출처 투명화 검증
+    const firstUltraHour = body1.regions[0].hours.find(h => h.source === '초단기예보');
+    assert.equal(firstUltraHour?.popSource, '단기예보');
+
+    // 2차 호출: ?force=1&refreshShort=1 상태에서 KMA 최신 shortBase가 일시 타임아웃 발생!
+    failLatestShort = true;
+    attemptedShortBaseTimes.length = 0;
+    const res2 = await worker.fetch(new Request('https://bionda.pages.dev/api/short-term-12?roster=13&force=1&refreshShort=1&refreshUltra=0'), env);
+    assert.equal(res2.status, 200);
+    const body2 = await res2.json();
+    assert.equal(body2.sources.shortBase, initialShortBase, '최신 kma-stale 캐시를 보존하여 직전 회차(-3h)로 절대 역행하지 않아야 함');
+    assert.equal(body2.sources.isFallback, true, '폴백 사용 여부가 투명하게 기록되어야 함');
+    // previous(-3h) base_time으로 내려가지 않았음을 확인
+    assert.ok(attemptedShortBaseTimes.every(bt => bt === latestShortBaseTimeSeen), 'kma-stale 보유 시 -180분 과거 base_time 호출을 하지 않아야 함');
+  } finally {
+    global.fetch = beforeFetch;
+  }
+});
+
+test('STEP 2 도로위험(012): null(정보 없음) vs 0(안전) 엄격 분리, 3종 공간 스코프 분리(전구간·남원~옥포·고령지사 95~176k), FRG/FOG 개별 시각 추출 검증', async () => {
+  const mod = await import(pathToFileURL(path.join(__dirname, '..', 'cloudflare', 'worker.js')).href);
+  const core = await import(pathToFileURL(path.join(__dirname, '..', 'lib', 'bionda-core.js')).href);
+  const worker = mod.default;
+  mod.__resetWorkerCaches();
+
+  // 1) normalizeRiskGrade & 라벨 검증 (No False Safety)
+  assert.equal(core.normalizeRiskGrade(0), 0);
+  assert.equal(core.normalizeRiskGrade('0'), 0);
+  assert.equal(core.normalizeRiskGrade(3), 3);
+  assert.equal(core.normalizeRiskGrade(null), null);
+  assert.equal(core.normalizeRiskGrade(undefined), null);
+  assert.equal(core.normalizeRiskGrade(''), null);
+  assert.equal(core.normalizeRiskGrade(-999), null);
+  assert.equal(core.formatRoadIceLabel(0), '안전');
+  assert.equal(core.formatRoadIceLabel(null), '정보 없음');
+  assert.equal(core.formatRoadFogLabel(0), '안개없음');
+  assert.equal(core.formatRoadFogLabel(null), '정보 없음');
+
+  // 2) 무안(126.45E, 0~50k) · 남원(127.43E, 50.8k) · 함양IC(127.7495E, 95.0k) · 옥포 인근(128.4015E, 169.2k) · 결측 링크 혼합 테스트
+  const frgCsv = [
+    'LINK_ID,S_NUM,F_LON,F_LAT,T_LON,T_LAT,B_ICE,FLAG,X_GRID,Y_GRID',
+    '1000000100,1,126.4500,34.9800,126.4550,34.9820,3,1,300,250', // 무안권 (위험 3단계 -> 고령지사 및 남원~옥포에서 제외되어야 함!)
+    '1570010000,1,127.4310,35.4110,127.4320,35.4120,2,1,330,290', // 남원 50.8k (주의 2단계 -> corridor에는 포함, 고령지사 branch에서는 제외!)
+    '1570030500,1,127.7490,35.5325,127.7500,35.5330,0,1,350,300', // 함양IC 95.0k (안전 0단계!)
+    '1570030600,1,128.4010,35.7650,128.4020,35.7656,-999,0,390,305' // 논공휴 169.2k (결측 -> null, 정보 없음!)
+  ].join('\n');
+  const fogCsv = [
+    'LINK_ID,S_NUM,F_LON,F_LAT,T_LON,T_LAT,FOG,FLAG,X_GRID,Y_GRID',
+    '1000000100,1,126.4500,34.9800,126.4550,34.9820,2,0,300,250',
+    '1570010000,1,127.4310,35.4110,127.4320,35.4120,1,0,330,290',
+    '1570030500,1,127.7490,35.5325,127.7500,35.5330,0,0,350,300',
+    '1570030600,1,128.4010,35.7650,128.4020,35.7656,0,0,390,305'
+  ].join('\n');
+
+  const env = { KMA_SERVICE_KEY: 'worker-secret-test-key', ROAD_LINE_CODE: '14' };
+  const beforeFetch = global.fetch;
+  global.fetch = async () => {
+    const zipBuf = makeTestZip([
+      { name: 'RWS/PRODUCT/FRG/202611/26/R012_1KM_FRG_202611260625.csv', content: frgCsv, deflate: false },
+      { name: 'RWS/PRODUCT/FOG/202611/26/R012_1KM_FOG_202611260600.csv', content: fogCsv, deflate: true }
+    ]);
+    return { ok: true, status: 200, arrayBuffer: async () => zipBuf };
+  };
+
+  try {
+    const res = await worker.fetch(new Request('https://bionda.pages.dev/api/road-risk?roadNum=012'), env);
+    assert.equal(res.status, 200);
+    const cc = String(res.headers.get('cache-control') || '');
+    assert.ok(cc.includes('max-age=120') && cc.includes('s-maxage=210'), '5분 주기 API허브에 맞춘 단축 Edge 캐시');
+    const rr = await res.json();
+
+    // A) FRG(15:25 KST) vs FOG(15:00 KST) 파일별 실제 생성시각 분리 검증
+    assert.equal(rr.sources.frgTmUtc, '202611260625');
+    assert.equal(rr.sources.fogTmUtc, '202611260600');
+    assert.ok(rr.sources.frgTmKst.includes('15:25'));
+    assert.ok(rr.sources.fogTmKst.includes('15:00'));
+
+    // B) 3개 공간 스코프 정확 분리 검증
+    assert.equal(rr.allRouteSummary.rangeLabel, '무안IC~옥포JC(012선 전구간)');
+    assert.equal(rr.allRouteSummary.maxIce, 3); // 무안 포함
+    assert.equal(rr.corridorSummary.rangeLabel, '남원(50.0k)~옥포JC(176.0k)');
+    assert.equal(rr.corridorSummary.maxIce, 2); // 무안 제외, 남원 포함
+    assert.equal(rr.branchSummary.rangeLabel, '함양IC(95.0k)~옥포JC(176.0k)');
+    assert.equal(rr.branchSummary.maxIce, 0);   // 함양IC(0단계 안전)만 유효, 논공휴(-999)는 결측 분리!
+    assert.equal(rr.branchSummary.iceLabel, '안전');
+    assert.equal(rr.branchSummary.missingIceCount, 1);
+
+    // C) 불변식 검증: total1km === sum(iceCounts) + missingIceCount
+    for (const scope of [rr.allRouteSummary, rr.corridorSummary, rr.branchSummary]) {
+      const sumCounts = Object.values(scope.iceCounts).reduce((a, b) => a + b, 0);
+      assert.equal(scope.total1km, sumCounts + scope.missingIceCount, `${scope.rangeLabel} 불변식 성립`);
+    }
+
+    // D) 관측소별 0('안전') vs 결측(null -> '정보 없음') 검증
+    const hamyang = rr.stationRisks.find(s => s.stnId === '14206');
+    const nongong = rr.stationRisks.find(s => s.stnId === '14103');
+    assert.equal(hamyang.iceLevel, 0);
+    assert.equal(hamyang.iceLabel, '안전');
+    assert.equal(hamyang.inBranch, true);
+    assert.equal(nongong.iceLevel, null);
+    assert.equal(nongong.iceLabel, '정보 없음');
+    assert.equal(nongong.dataStatus, 'missing');
+  } finally {
+    global.fetch = beforeFetch;
+  }
+});

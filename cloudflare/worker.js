@@ -34,6 +34,7 @@ import {
   detectRadarImageType,
   utcFiveMinSlot,
   extractZipTextEntries,
+  parseZipEntryTimestamp,
   parseRoadRiskCsv,
   buildRoadRiskPayload,
   matchStationRiskForCoord,
@@ -235,7 +236,12 @@ async function fetchKma(env, resource, grid, base, timeout = 5000, bypassCache =
         const ttlMs = resource === 'getVilageFcst' ? 45 * 60000 : 5 * 60000;
         const staleTtlMs = resource === 'getVilageFcst' ? 6 * 3600000 : 90 * 60000;
         setCached(cacheKey, items, ttlMs);
-        setCached(staleKey, { items, base: isoKst(base) }, staleTtlMs);
+        // 단조 증가(Monotonic) Stale 보호: 과거 발표회차 폴백 조회가 이미 보관된 최신 발표회차를 덮어쓰지 못하도록 차단
+        const nextIso = isoKst(base);
+        const prevStale = getCached(staleKey);
+        if (!prevStale?.base || Date.parse(nextIso) >= Date.parse(prevStale.base)) {
+          setCached(staleKey, { items, base: nextIso }, staleTtlMs);
+        }
         return items;
       } catch (e) {
         lastErr = e;
@@ -255,6 +261,16 @@ async function fetchWithFallback(env, resource, grid, base, prevMinutes, bypassC
     return { items: await fetchKma(env, resource, grid, base, 5000, bypassCache), base: isoKst(base) };
   } catch (error) {
     const previous = new Date(base.getTime() - prevMinutes * 60000);
+    // 이미 직전 정상 수신본(stale)의 발표시각이 previous보다 최신(예: 17:00 보유 중 일시 타임아웃 시 14:00 역행 방지)이면 stale 우선 반환!
+    const staleFirst = getCached(`kma-stale|${resource}|${grid.nx}|${grid.ny}`);
+    if (staleFirst?.items?.length && staleFirst.base && Date.parse(staleFirst.base) > Date.parse(isoKst(previous))) {
+      return {
+        items: staleFirst.items,
+        base: staleFirst.base,
+        notice: '기상청 일시 지연으로 직전 수신 최신회차 유지',
+        stale: true
+      };
+    }
     try {
       return {
         items: await fetchKma(env, resource, grid, previous, 5000, bypassCache),
@@ -317,7 +333,7 @@ async function fetchShortTerm12(env, optionsOrForce = false) {
         if (!probePromise) {
           probePromise = fetchWithFallback(env, 'getUltraSrtFcst', grid, uBase, 60, refreshUltra)
             .then(res => {
-              resolvedUBase = res.notice ? new Date(uBase.getTime() - 60 * 60000) : uBase;
+              resolvedUBase = res.base === isoKst(uBase) ? uBase : new Date(uBase.getTime() - 60 * 60000);
               return { firstKey: `${grid.nx},${grid.ny}`, res };
             })
             .catch(err => {
@@ -332,14 +348,36 @@ async function fetchShortTerm12(env, optionsOrForce = false) {
       return { items: await fetchKma(env, 'getUltraSrtFcst', grid, activeBase, 6000, refreshUltra), base: isoKst(activeBase) };
     };
 
-    const payload = await collectShortTerm12({
+    let payload = await collectShortTerm12({
       now,
       fetchShort: (grid) => fetchWithFallback(env, 'getVilageFcst', grid, sBase, 180, refreshShort),
       fetchUltra: fetchUltraSmart
     });
+    const verifiedKey = `short12-last-verified|h${curHour}`;
+    const lastVerified = getCached(verifiedKey);
+    const curShortMs = Date.parse(payload.sources?.shortBase || '');
+    const prevShortMs = Date.parse(lastVerified?.sources?.shortBase || '');
+    // 회차 역행 원천 차단: 이미 검증 게시된 최신 발표회차보다 오래된 회차로 후퇴하려 할 경우 직전 검증 배치를 유지
+    if (!opts.hard && lastVerified && Number.isFinite(prevShortMs) && (!Number.isFinite(curShortMs) || curShortMs < prevShortMs)) {
+      payload = {
+        ...lastVerified,
+        sources: {
+          ...lastVerified.sources,
+          isFallback: true,
+          status: 'stale-preserved',
+          fallbackReason: '상류 지연으로 직전 검증 최신회차 유지'
+        }
+      };
+    }
+
     const completeRegions = (payload.regions || []).filter(r => Array.isArray(r.hours) && r.hours.length > 0).length;
+    const isMixed = Boolean(payload.sources?.mixedGeneration);
+    if (completeRegions >= 13 && !isMixed && payload.sources?.shortBase) {
+      setCached(verifiedKey, payload, 3 * 3600000);
+    }
+    const pendingShort = !payload.sources?.shortBase || Date.parse(payload.sources.shortBase) < Date.parse(isoKst(sBase));
     const pendingUltra = !resolvedUBase || resolvedUBase.getTime() < uBase.getTime();
-    const ttlMs = completeRegions < 13 ? 20000 : (pendingUltra ? 45000 : 5 * 60000);
+    const ttlMs = (completeRegions < 13 || isMixed) ? 20000 : ((pendingShort || pendingUltra) ? 45000 : 5 * 60000);
     setCached(cacheKey, payload, ttlMs);
     return payload;
   });
@@ -518,7 +556,8 @@ async function fetchRoadRisk(env, roadNum = '012', bypassCache = false) {
 
   return withInFlight(bypassCache ? `${cacheKey}|bypass` : cacheKey, async () => {
     const now = Date.now();
-    const offsetsMinutes = [5, 10, 15];
+    // KMA APIHub 도로살얼음 위험정보는 5분 주기로 생산되므로 3분 전부터 5분 슬롯을 탐색하고 4분 캐시로 최신성 유지
+    const offsetsMinutes = [3, 5, 10, 15, 20];
     for (const off of offsetsMinutes) {
       try {
         const { tmUtc, tmKst } = utcFiveMinSlot(now - off * 60000);
@@ -526,7 +565,7 @@ async function fetchRoadRisk(env, roadNum = '012', bypassCache = false) {
         u.searchParams.set('tm', tmUtc);
         u.searchParams.set('roadNum', cleanNum);
         u.searchParams.set('authKey', deEncodedKey(key));
-        const r = await fetchWithTimeout(u.toString(), {}, 4000);
+        const r = await fetchWithTimeout(u.toString(), {}, 5500);
         if (!r.ok) continue;
         const bytes = new Uint8Array(await r.arrayBuffer());
         if (bytes.length < 22 || bytes[0] !== 0x50 || bytes[1] !== 0x4b) continue;
@@ -537,8 +576,20 @@ async function fetchRoadRisk(env, roadNum = '012', bypassCache = false) {
         const frgRows = frgEntry ? parseRoadRiskCsv(frgEntry[1]) : [];
         const fogRows = fogEntry ? parseRoadRiskCsv(fogEntry[1]) : [];
         if (!frgRows.length && !fogRows.length) continue;
-        const payload = buildRoadRiskPayload({ roadNum: cleanNum, tmUtc, tmKst, frgRows, fogRows });
-        setCached(cacheKey, payload, 9 * 60000);
+        const frgMeta = frgEntry ? parseZipEntryTimestamp(frgEntry[0]) : null;
+        const fogMeta = fogEntry ? parseZipEntryTimestamp(fogEntry[0]) : null;
+        const payload = buildRoadRiskPayload({
+          roadNum: cleanNum,
+          tmUtc,
+          tmKst,
+          frgTmUtc: frgMeta?.tmUtc || null,
+          frgTmKst: frgMeta?.tmKst || null,
+          fogTmUtc: fogMeta?.tmUtc || null,
+          fogTmKst: fogMeta?.tmKst || null,
+          frgRows,
+          fogRows
+        });
+        setCached(cacheKey, payload, 4 * 60000);
         setCached(staleKey, payload, 25 * 60000);
         return payload;
       } catch (e) {
@@ -546,7 +597,7 @@ async function fetchRoadRisk(env, roadNum = '012', bypassCache = false) {
       }
     }
     const stale = getCached(staleKey);
-    if (stale) return stale;
+    if (stale) return { ...stale, stale: true, isFallback: true };
     throw new Error('도로 위험기상정보(FRG/FOG) ZIP 자료를 가져오지 못했습니다.');
   });
 }
@@ -1014,13 +1065,16 @@ export default {
         const secsToHour = Math.max(5, Math.ceil((3600000 - (nowMs % 3600000)) / 1000));
         // 35분(HH:35:00) 경계에 KMA 새 초단기예보가 열리므로 Edge/Browser 캐시가 35분을 넘기지 않도록 제한
         const minsPast35 = kstMin < 35 ? (35 - kstMin) * 60 : 3600;
+        const expectedShortIso = isoKst(baseShort(nowMs));
         const expectedUltraIso = isoKst(baseUltra(nowMs));
+        const pendingShortRelease = !value?.sources?.shortBase || Date.parse(value.sources.shortBase) < Date.parse(expectedShortIso);
         const pendingUltraRelease = !value?.sources?.ultraBase || Date.parse(value.sources.ultraBase) < Date.parse(expectedUltraIso);
         const completeRegions = (value?.regions || []).filter(r => Array.isArray(r.hours) && r.hours.length > 0).length;
-        const capSec = pendingUltraRelease ? 45 : 300;
+        const isMixed = Boolean(value?.sources?.mixedGeneration);
+        const capSec = (pendingShortRelease || pendingUltraRelease) ? 45 : 300;
         const maxAge = Math.min(180, secsToHour, minsPast35, capSec);
         const sMaxAge = Math.min(300, secsToHour, minsPast35, capSec);
-        const bypassAllCache = bypassNow || refreshShort || refreshUltra || completeRegions < 13;
+        const bypassAllCache = bypassNow || refreshShort || refreshUltra || completeRegions < 13 || isMixed;
         const res = jsonResponse(request, env, 200, value, {
           'Cache-Control': bypassAllCache ? 'no-store' : `public, max-age=${maxAge}, s-maxage=${sMaxAge}, stale-while-revalidate=60`
         });
@@ -1083,10 +1137,11 @@ export default {
             out = { ...value, customPlaceRisk: matchStationRiskForCoord(lat, lon, value.stationRisks, null, null, 6) };
           }
         }
+        const skipRiskCache = bypassNow || Boolean(out?.stale);
         const res = jsonResponse(request, env, 200, out, {
-          'Cache-Control': bypassNow ? 'no-store' : 'public, max-age=480, s-maxage=540'
+          'Cache-Control': skipRiskCache ? 'no-store' : 'public, max-age=120, s-maxage=210'
         });
-        if (!bypassNow) putEdgeCache(ctx, cacheKeyReq, res);
+        if (!skipRiskCache) putEdgeCache(ctx, cacheKeyReq, res);
         return res;
       } catch (e) {
         return jsonResponse(request, env, 502, { error: errMessage(e) });
