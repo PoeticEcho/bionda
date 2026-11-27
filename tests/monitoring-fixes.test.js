@@ -282,10 +282,14 @@ test('Fix 3 (/hourly 공유 Last-Good 스냅샷 SWR): 콜드 만료 시 직전 �
   }
 });
 
-test('Fix 4 (night.png 스케줄 발행 복구): publish-share.py는 기본적으로 briefing.json을 수정하지 않아 CI git pull --rebase 충돌(exit 128)을 방지한다', () => {
+test('Fix 4 (night.png 스케줄 발행 복구 및 브리핑 표기 통일): publish-share.py 워킹트리 무결성 및 기상청 시간별예보 라벨을 검증한다', () => {
   const scriptPath = path.join(__dirname, '..', 'scripts', 'publish-share.py');
   execFileSync('python', ['-m', 'py_compile', scriptPath]);
   const src = require('node:fs').readFileSync(scriptPath, 'utf8');
   assert.ok(src.includes('"--write-briefing"'), '--write-briefing 명시 플래그가 존재해야 함');
   assert.ok(src.includes('if not args.bootstrap and args.write_briefing:'), '기본 실행 시 public/api/briefing.json 미수정으로 워킹트리를 깨끗하게 유지해야 함');
+
+  const shareSrc = require('node:fs').readFileSync(path.join(__dirname, '..', 'public', 'share.js'), 'utf8');
+  assert.ok(shareSrc.includes("text('기상청 시간별예보'"), '공유 브리핑 PNG 하단 섹션명이 기상청 시간별예보로 표기되어야 함');
+  assert.ok(!shareSrc.includes('13지역 시간별예보'), '기존 13지역 시간별예보 하드코딩 문구가 제거되어야 함');
 });
