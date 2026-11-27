@@ -1,159 +1,128 @@
-# 비온다? × 날씨봇 — 고속국도 12호선(광주대구선) 도로기상·단기예보 통합 상황판
+# 비온다? × 날씨봇 — 고속국도 12호선(광주대구선) 도로기상·도로살얼음·단기예보 통합 관제 시스템
 
-고속국도 12호선(무안광주대구선 · 고령지사 관할 중심)의 **실시간 도로기상관측(노면온도 `TR1`·노면상태 `SFS`)**, **012선 1km 단위 도로살얼음·안개 위험(5분 단위)**, **기상청 초단기·단기예보 12시간 병합 분석**, **3단계 제설·수방·교량 횡풍 의사결정**, **고령지사 관내·연계 13개 읍·면·동 1시간 단기예보 비교 상황판**을 통합 제공하는 도로관리·생활기상 웹서비스입니다.
+한국도로공사 고령지사 관할 **고속국도 제12호선 광주대구선(`함양IC 95.0k ~ 옥포JC 176.0k`, 서쪽 선행 감시 `남원 50.0k~` 포함)**의 **실시간 도로기상관측(노면온도 `TR1` · 공식 노면상태 `SFS`)**, **기상청 RWIS 및 012선 1km 단위 도로살얼음·안개 위험정보(5분 주기)**, **한국도로공사 공식 대응지침 기반 주의·위험 격상 알림**, **13개 읍·면·동 1시간 초단기·단기예보**, **3단계 제설·수방·교량 횡풍 의사결정**, **72시간 제설근무 사후분석·CSV 추출**을 통합 제공하는 24×7 상황실 TV · 모바일 겸용 웹 시스템입니다.
+
+- **운영 주소 (Primary · Cloudflare Pages + Worker)**: https://bionda.pages.dev
+- **백업 미러 (Mirror · GitHub Pages)**: https://poeticecho.github.io/etc/bionda/
+- **관련 기술 문서**:
+  - 유지보수·불변식·변경 이력서: [`docs/MAINTENANCE_HISTORY.md`](docs/MAINTENANCE_HISTORY.md)
+  - 타 지사 전환(Multi-Branch) 설계 가이드: [`docs/BRANCH_MIGRATION_GUIDE.md`](docs/BRANCH_MIGRATION_GUIDE.md)
+  - ITS/로드플러스 CCTV 연동 안내: [`README_cctv.md`](README_cctv.md)
 
 ---
 
-## 1. 페이지 및 배포 아키텍처
+## 1. 전체 화면 구성 및 배포 아키텍처
 
-| 경로 / 페이지 | 주요 역할 | 비고 |
+| 경로 / 파일 | 화면 및 역할 | 주요 특징 |
 | :--- | :--- | :--- |
-| `/` (`public/index.html`, `app.js`) | **도로기상 상황판** (메인) | 최대 8개 관심지역 · 모바일 2×4 무스크롤 · PC 상하(4×2)/좌우 FHD 분할 · 미니맵 · Windy/HSR 레이더 · 공용 PNG 미리보기·저장·공유 |
-| `/hourly` (`public/hourly.html`, `hourly.js`) | **1시간 단기예보 비교 상황판** | 고령지사 관내·연계 13개 읍면동 × 6h/12h(FHD 1화면)/24h/내일까지 · 강수/영하/겹침 KPI 강조 · KMA 원본형 상세표 |
-| `/hero-preview` (`public/hero-preview.html`) | **상세 배너 동적 연출 검수 시안** | 주야간·9종 날씨·음력 달령·구름 투과·살얼음/한파 시뮬레이터 (운영 `index.html` 미연동 독립 검수용) |
-| `/api/*` (`functions/api/[[path]].js`) | **Cloudflare Pages Functions 게이트웨이** | Service Binding(`env.API_WORKER`)으로 Worker `bionda`에 0ms 내부 RPC 전달 → 사내망 `*.workers.dev` TLS 차단 회피 |
-| `cloudflare/worker.js` + `lib/bionda-core.js` | **백엔드 API 서버** | Workers & Node(`server.js`) 공통 엔진 · Single-file Quick Edit 배포용 `dist/bionda-worker.standalone.js` 생성 |
-
-> **정적 미러링(GitHub Pages)**: `PoeticEcho/etc/bionda/` 접속 시 `public/config.js`의 `DEFAULT_API_BASE`가 자동으로 `https://bionda.pages.dev`로 연결됩니다(기존 `*.workers.dev` 저장값도 자동 마이그레이션). 백엔드 장애 시에는 정적 스냅샷(`api/snapshot.json`, `api/short-term-12.json`) + 브라우저 Direct Open-Meteo Fallback으로 무중단 동작합니다.
+| `/` (`public/index.html`, `app.js`) | **도로기상 상황판** (메인) | 8개 관심지역 실황·예보·특보 카드 · 노선 미니맵(`minimap.js`) · 11개 도로관측소 스트립 · Windy/KMA 레이더/인근 CCTV · 지역 상세(`#region/...` 12h 타임라인 + ICON 앙상블 6h + 살얼음·제설 지시카드) |
+| `/hourly` (`public/hourly.html`, `hourly.js`) | **1시간 단기예보 비교 상황판** | 관내·연계 13개 읍·면·동 × 6h/12h/24h(기본)/내일까지 매트릭스 · **Edge 공유 `Last-Good` 스냅샷 `<0.1s` 즉시표출 + 백그라운드 SWR** · 강수/영하/동시겹침 KPI 셀 강조 |
+| `/rwis` (`public/rwis.html`, `rwis.js`) | **도로살얼음 상황판** (50인치 TV · 모바일) | **50인치 TV `1920×1080` 무스크롤** 단일 화면 · 8개 콘존 양방향 살얼음(`FSM`)/안개(`VIR`) 지도 · 7개 관측소 콜아웃(`2·2·1·2`) · 13개소 기온 배지 · `6h 실측 + 2h 예측` 스파크라인 · 62지점 CCTV · **모바일 `[⛶ 지도 크게]` 전체화면 확대·90° 회전 뷰어** |
+| `/diagnostics.html` (`public/diagnostics.js`) | **데이터 파이프라인 건전성 진단** | 도로관측(1분)·012선 위험ZIP(5분)·RWIS(`FR/VR`)·13개소 예보·특보·브리핑 6대 채널 개별 병렬 점검 및 **도로공사 주의(2)·위험(3) 격상 알림·차임벨 시뮬레이터** |
+| `/history-72h.html` (`public/history-72h.js`) | **72시간 제설근무 매칭 · CSV 추출** | 평시 API 호출 `0`(수동 클릭 시에만 37슬롯 이하 분할 조회) · 예비살포·본살포 투입 시각 기준 **`T-2h → T=0 → T+2h`** 대기·노면온도·노면상태 자동 매칭 분석 및 **엑셀 한글 호환 UTF-8 BOM CSV** 다운로드 |
+| `/share/*` (`share.js`, `publish-share.py`) | **08시·18시 정기 브리핑 채널** | 매일 `08:00`·`18:00` KST 자동 생성 (`morning.png`, `night.png`, `/share/status.json`, `/api/briefing`, [`llms.txt`](public/llms.txt)) |
+| `/api/*` (`functions/api/[[path]].js` + `cloudflare/worker.js`) | **동일 도메인 API 게이트웨이 & 백엔드** | Cloudflare Pages Service Binding(`env.API_WORKER`)으로 사내 방화벽 `*.workers.dev` 차단 우회 · 단독 배포용 `dist/bionda-worker.standalone.js` 지원 |
 
 ---
 
-## 2. 정보 원천(Data Sources) 및 실측 vs 예보 우선순위
+## 2. 데이터 원천(Data Sources) 및 정합성 원칙
 
-### 2.1 실측 관측 우선 원칙 (도로기상 상황판 현재 상태)
-메인 상황판의 카드·상세 헤더에 표시되는 **현재 기온, 습도, 오늘 강수, 적설, 풍속, 시정, 노면온도, 노면상태**는 **예보 모델이 아닌 실제 관측 API**에서 우선 가져옵니다.
+### 2.1 실측 관측 우선 원칙 및 공식 `SFS` 노면상태 코드
+메인 상황판·도로살얼음 상황판·격상 팝업에 표시되는 **현재 기온, 습도, 노면온도, 노면상태, 시정, 강수, 풍속**은 예보 모델이 아닌 **실제 관측 API**를 최우선 반영합니다.
 
 1. **1순위 — 기상청 고속도로 도로기상관측망 (`road_stn_obs.php?mode=2&var=14`)**
-   - 원천: API허브 고속도로 노선 관측(무안광주대구선 API코드 `var=14`, 20개 관측소 매분 자료, EUC-KR 인코딩).
-   - 조회 오프셋: 현재 시각 기준 `[-2분, -5분, -9분]` 순으로 재시도(지연·결측 시 직전 유효 관측소 반환).
-   - 실측 필드: 대기기온(`TA`), 습도(`HM`), 광학 노면온도(`TR1`), 노면상태(`SFS`: `1 건조 / 2 습윤 / 3 수막 / 4 적설 / 5 결빙 / 6 슬러시 / 7 소금물`), 시정(`VS`), 일 누적강수(`RN_DAY`), 적설(`SD`), 풍속(`WS1`)·돌풍(`WS_INS`).
-   - 매칭 규칙(`matchRoadStation`): 일반 기온(`primary`)은 유효 기온 보유 최근접 관측소, 노면온도(`nearestRoad`)는 유효 `TR1` 보유 최근접 관측소, **결빙취약교량**(KMA 분류명 `목표(결빙)`)은 동일 권역 반경 `14km` 이내에 위치하고 최근접 노면관측소 자체와 중복되지 않는 교량 집중감시 지점만 추가 병기합니다(`거창휴(도)` 권역 야로면에 24km 밖 `논공교(도)`가 오매칭되거나 현풍읍에 `논공교(도)`가 중복 표기되지 않도록 차단; 거리 `28km` 초과 시 노선 외 지역 간주).
+   - 원천: 기상청 API허브 무안광주대구선(`var=14`, EUC-KR 인코딩, 매 1분 생산).
+   - 조회 오프셋: 현재 시각 기준 **`[-1분, -2분, -3분, -5분, -8분]`** 순차 탐색으로 현장 관측과 1~2분 내 동기화하며, `SHARED_ROAD_OBS_KEY` 단조 증가(Monotonic) 규칙으로 탭 간 온도 역전을 원천 차단합니다.
+   - **기상청 공식 `SFS` 노면상태 코드 전종 반영 (`SURFACE_STATES`, `lib/bionda-core.js`)**:
+     - `01` 건조 · `02` 습윤 · `03` 적설 · `04` 결빙 · `05` 서리 · `06` 슬러시 · `07` 습윤(제설제)
+     - `10` 저시정 · `11` 수막 · `12` 화학습윤 · `13` 임계습윤 · **`14` 습기(Damp)** · `15` 눈·결빙
+     - 영상 온도에서 `14(습기)`나 `10(저시정)`이 결빙 적색 경보로 오표출되지 않도록 분리하고, 저온(`노면 ≤ 2.0°C · 대기 ≤ 4.0°C`)에서 수분 코드가 감지될 때만 예비살포 조건으로 판정합니다. 복수 관측소 구간은 코드 번호 크기가 아닌 **실제 위험도 순위(`surfaceSeverityRank`)**로 대표 상태를 선정합니다.
+   - 결빙취약교량(`목표(결빙)`): 반경 `14km` 이내이면서 최근접 노면관측소와 중복되지 않는 교량 센서만 보조 병기합니다(반경 `28km` 초과 시 노선 외 지역 처리).
 2. **2순위 — 기상청 초단기실황 (`getUltraSrtNcst`)**
-   - 반경 `28km` 내에 도로관측소가 없거나(`서울` 등 사용자 추가 지역) 도로관측소에 기온/습도가 누락된 격자(`gridNeedsNcst`)에만 **조건부 호출**하여 AWS/ASOS 실측(`T1H`, `REH`, `PTY`, `RN1`, `WSD`)을 병합합니다.
-3. **3순위(Fallback) — Open-Meteo / 정적 스냅샷**
-   - 관측 API(`o`)가 모두 실패한 경우에만 Open-Meteo `current` 또는 빌드 타임 스냅샷을 최후 폴백으로 사용합니다.
-   - *(참고)* 도로기상관측소는 하늘 상태(운량)를 관측하지 않으므로, 강수가 없는 평소 하늘 문구(`대체로 맑음`, `구름많음` 등)는 예보 `description`/`skyLabel`을 참고합니다.
+   - 반경 `28km` 내 도로관측소가 없거나 기온·습도가 결측인 격자에만 조건부 호출해 불필요한 상류 호출을 절감합니다.
+3. **시간별 기온 정합성 (`ICON 앙상블` 6시간 표 ↔ 기상청 타임라인)**
+   - 상세 화면 `"앞으로 6시간 (ICON 앙상블)"` 표는 비/눈 멤버 확률(`rain ≥ 0.1mm`, `snowfall ≥ 0.1cm`)만 ICON 앙상블에서 가져오고, **기온·습도·풍속·강수확률은 기상청 초단기·단기예보로 동기화**하여 상단 타임라인과의 야간 산간 복사냉각 기온 괴리를 원천 제거했습니다.
 
-### 2.2 전체 API 원천 및 업데이트 주기·캐시 TTL 일람표
+### 2.2 전체 API 엔드포인트 및 캐시 정책 일람표
 
-| 구분 | API 엔드포인트 / 원천 | KMA 실생산 주기 및 지연 | 백엔드 메모리 TTL | Edge / CDN 캐시(`s-maxage`) | 비고 |
-| :--- | :--- | :--- | :--- | :--- | :--- |
-| **도로관측(매분)** | `apihub.../road_stn_obs.php` (`var=14`) | **1분마다** 생산 (`-2/-5/-9분` 조회) | **2분** (stale 20분) | `60s / 90s` (`road-obs`, `bundle`) | 실측 노면 `TR1`·`SFS`·기온 |
-| **012 도로위험기상** | `apihub.../road_file_down.php` (`roadNum=012`) | **5분마다** UTC 슬롯 ZIP (`-5/-10/-15/-20분`) | **9분** (stale 25분) | `480s / 540s` | `_1KM_FRG_`(살얼음)·`_1KM_FOG_`(안개) `0~3단계` |
-| **초단기실황** | `VilageFcstInfoService_2.0/getUltraSrtNcst` | **매시 정시(`HH:00`)** · +25분 제공 | `kma\|...` **5분** | `/api/forecast` `300s` | 도로관측 결측·노선 외 지점만 호출 |
-| **초단기예보** | `VilageFcstInfoService_2.0/getUltraSrtFcst` | **매시 `:30` 기준** · **`:35~:45`분 공개** | `kma\|...` **5분** | **동적 cap** (`:35` 경계 · 정시 · 미공개 시 `45s`) | `+1~+6시간` 1시간 단위 실예측 |
-| **단기예보** | `VilageFcstInfoService_2.0/getVilageFcst` | **일 8회(`02,05,08,11,14,17,20,23`시)** · +20분 공개 | `kma\|...` **45분** | 정시/`35분` 경계 이하 (`max 300s`) | 오늘~모레(~48h) `TMP/POP/SKY/PTY/PCP/SNO/LGT` |
-| **기상특보 + 폴리곤** | `wrn_now_data.php` + `weather.go.kr/w/rss/cap/warning.do` | 수시 발표 (특보 텍스트 + CAP XML) | `wrn` **90초** (장애 시 stale **20분**) · CAP **120초** | `55s / 90s` (`stale` 시 `30s`) | 단건(`name`) + **일괄(`places`) 1회 조회** · CAP 폴리곤 교차 판정 |
-| **레이더 영상** | `apihub.../nph-rdr_cmp1_img` (HSR 합성) | **5분마다** | **4분** | `240s` (파라미터 `t` 정규화) | 매직바이트 검증 후 바이너리 응답 |
-| **Open-Meteo 보조** | `/api/open-meteo` (`forecast`, `ensemble` `icon_seamless`) | 1시간 / 모델 주기 | `forecast` 5분 · `ensemble` **30분** | `300s` / `1800s` | 다중좌표 일괄 1회 호출, `429` 시 15분 쿨다운 |
-| **통합 번들 (`index`)** | `/api/overview-bundle` | 요청 시 조합 | **90초** | `60s / 90s` (`force=1` 시 `no-store`) | 8지역 관측·예보·특보·도로·012위험 **1회 통합** (좌표 정렬 캐시키) |
-| **13지역 단기 (`hourly`)** | `/api/short-term-12` | 요청 시 조합 | **5분** (초단기 대기 중 **45초**) | `max 300s` (정시·`:35` 초과 불가, 대기 중 **45s**) | 13개소 → 고유 **12격자** 3격자씩 분할 병렬 조회 |
-
----
-
-## 3. 프론트엔드 자동 갱신 및 `[↻ 새로고침]` 강제 재조회 로직
-
-### 3.1 도로기상 상황판 (`public/app.js`)
-- **페이지 전환 0ms 로컬 캐시 · 3분 머무름 SWR (`public/page-cache.js`)**:
-  - 최근 응답을 `localStorage`(`weather-watch:cache:overview:v1`) 및 백엔드 상태 캐시(`weather-watch:cache:health:v1`)에 보관합니다.
-  - 단기예보 등 다른 페이지를 오갔을 때 **5분 이내·동일 KST 정시**라면 `0ms` 즉시 복원하고 불필요한 API 재호출을 생략하며, 해당 화면에 **3분 이상 머무르면** 백그라운드에서 조용히 최신화(SWR)합니다. (5분~20분 경과 또는 정시 변경 시에도 직전 값을 먼저 표출한 채 즉시 백그라운드 갱신)
-- **매 5분(`300,000ms`)**: `!document.hidden`일 때 백그라운드 `refresh({ silent: true })` 실행 → `bundle`(90초 TTL) 및 `road-obs`(2분 TTL)가 만료되어 매 5분마다 **항상 최신 1분 도로관측 및 5분 도로위험**을 수신합니다.
-- **매 2분(`120,000ms`)**: `!document.hidden`일 때 `pollWarnings()`가 전 지점을 `/api/warnings?places=...` **단일 일괄 호출**로 감시(직전 번들이 105초 내 이미 수신했으면 중복 생략)하고, 특보 등급 상승 시 상단 토스트 + Web Audio 경보음/기기 알림을 발동합니다.
-- **탭 복귀(`visibilitychange`)**: 화면 WakeLock 재획득 + 마지막 라이브 동기화 기준 **5분 경과 또는 정시 변경 시**에만 `refresh()` 수행(짧은 탭 전환 시 중복 호출 방지).
-- **상단/상세 `[↻ 새로고침]` (`refresh(true)`)**: `force=1`로 Edge·Worker 메모리 캐시(`bundle`, `road-obs`) 및 Open-Meteo `forecast` 캐시를 즉시 우회하여 재조회합니다.
-
-### 3.2 1시간 단기예보 (`public/hourly.js`)
-KMA 초단기예보는 매시 정각이 아닌 **`HH:30` 발표분(`HH:35~:45` API 공개)**으로 갱신되고 단기예보는 1시간 단위이므로, **즉시 전환 캐싱 + 3중 자동 갱신(정시 · 36분 · 10분)** 을 조합합니다.
-
-1. **페이지 전환 0ms 로컬 캐시 · 3분 머무름 SWR**: `localStorage`(`weather-watch:cache:hourly:v1`)가 **5분 이내 · 동일 KST 정시 · 초단기 신규 발표 전**이면 즉시 렌더링해 전환 지연을 없애고, **3분 이상 머무르면** 백그라운드에서 조용히 최신화합니다.
-2. **정시 롤오버 (`scheduleTopOfHourRefresh`)**: 매시 `HH:00:01.5 KST`에 `?force=1&refreshShort=1&refreshUltra=1`로 호출해 표의 시간축(`06시~` → `07시~`)을 정각에 즉시 전환(백그라운드 절전 시 `visibilitychange` + 1분 체크로 즉시 보정).
-3. **초단기 신규 발표 픽업 (`scheduleUltraPickupRefresh`)**: 매시 **`HH:36:15 KST`**에 `refreshUltra=1`로 자동 호출하여 방금 공개된 `HH:30` 초단기예보를 즉시 반영.
-4. **10분 주기 갱신 (`600,000ms`, visible 탭 한정)**: `isUltraUpdateDue()`(`ultraBase + 66분` 경과 여부, 예: `05:30` 자료 유지 상태에서 `06:36` 도달)를 검사해 신규 발표 시각이 지났으면 자동으로 `force=1&refreshUltra=1` 우회 조회합니다.
-5. **상단 `[↻ 새로고침]` 수동 클릭 규칙 (`computeManualRefreshFlags`)**:
-   - **단기예보 (`refreshShort`)**: 현재 표시된 `shortBase`로부터 **3시간(180분) 이상** 경과 시 Worker `getVilageFcst` 12격자 캐시까지 완전히 우회해 강제 재조회 (`3시간 미만`이면 Worker 격자 캐시 활용).
-   - **초단기예보 (`refreshUltra`)**: 현재 표시된 `ultraBase`로부터 **10분 초과** 경과 시 Worker `getUltraSrtFcst` 12격자 캐시까지 완전히 우회해 기상청 직접 재조회 (`force=1`로 Cloudflare Edge Cache는 항상 우회).
+| 구분 | API 경로 / 상류 원천 | 원천 생산 주기 | Worker 메모리 / Edge 캐시 정책 | 비고 |
+| :--- | :--- | :--- | :--- | :--- |
+| **도로관측(실측)** | `/api/road-obs?line=14` (`road_stn_obs.php`) | **1분** | 메모리 `45s` · Edge `30~45s` + `Last-Good 15m` | 고령지사 본선 7개소 + 서쪽 선행 4개소 |
+| **도로관측 6h 추세** | `/api/road-obs-trend?line=14&hours=6` | 30분 슬롯 + 최신분 | 메모리 `5m` · Edge `10m` (과거 슬롯 `6h`) | 구간 카드 `6h 실측 + 2h 예측` 스파크라인 |
+| **도로관측 72h 이력** | `/api/road-obs-history` | 수동 호출 전용 | 과거 불변 슬롯 메모리·Edge `6h` | 1회 최대 37슬롯 청크 분할 · 평시 호출 `0` |
+| **012선 도로위험 ZIP** | `/api/road-risk?roadNum=012` (`road_file_down.php`) | **5분** | 메모리 `4m` · Edge `120~210s` (stale `25m`) | `0(안전)` vs `null(정보 없음)` 분리 · `FRG/FOG` 개별 시각 · 3단계 공간 스코프 |
+| **RWIS 콘존 등급** | `/api/rwis/api/rwis` (`rwis.kma.go.kr`) | **5분** | Edge `120s` (콘존 마스터 `6h`) | 5.6MB 위험표 `ReadableStream` 경량 추출 (`FR`/`VR` 개별 시각) |
+| **고속도로 CCTV** | `/api/cctv` & `/api/rwis/api/stream` | 15분 / 실시간 | 목록 `15m` · 로드플러스 HLS `2m` | ITS Open API + 로드플러스 실시간 스트림 |
+| **단기·초단기 단건** | `/api/forecast` (`getUltraSrtFcst` + `getVilageFcst`) | 초단기 매시 `:35` / 단기 일 8회(`+11m`) | 초단기 `5m` · 단기 `45m` (`kma-stale` 역행 방지) | `+1~6h` 초단기 우선 + `~12h` 단기 병합 |
+| **13개소 시간별예보** | `/api/short-term-12?roster=13` | 초단기 1h / 단기 3h | **Fresh `≤4m`(:00/:35 경계) + 공유 `Last-Good 12h` SWR** | 콜드 만료 시에도 공유 스냅샷 **`<0.1s` 즉시 반환** 후 백그라운드 최신화 |
+| **통합 번들 (`index`)** | `/api/overview-bundle` | 요청 시 조합 | 메모리 `45s` · Edge `30~45s` | 8개 관심지역 관측·예보·특보·012위험 단일 호출 |
+| **기상특보 + 폴리곤** | `/api/warnings` (`wrn_now` + CAP XML) | 수시 | `90s` (장애 시 stale `20m`) · CAP `30m` | 다중 지점 `places` 1회 일괄 조회 + CAP 폴리곤 판정 |
+| **건전성·브리핑** | `/api/data-health`, `/api/briefing`, `/share/status.json` | 진단 시 / 일 2회 | `data-health 45s` · `briefing 30m` · `status no-store` | 파이프라인 불변식 점검 및 외부 봇 브리핑 |
 
 ---
 
-## 4. 핵심 도메인 로직 및 13개/8개 기준 지점
+## 3. 상황실 운영 UX · 자동 갱신 · 한국도로공사 공식 격상 알림
 
-### 4.1 8개 기본 감시 거점 (`CORRIDOR_WATCHED_PLACES`, `index.html`)
-1. **대구 달성군남부**(현풍읍 `35.697, 128.447`, `(86,87)`) · 2. **함양중부**(지곡면 `35.566, 127.774`, `(74,83)`) · 3. **거창군남부**(남상면 `35.644, 127.910`, `(77,85)`) · 4. **합천군서북부**(야로면 `35.706, 128.168`, `(81,87)`) · 5. **고령군**(대가야읍 `35.728, 128.263`, `(83,87)`) · 6. **남원**(남원시청 `35.416, 127.390`, `(68,80)`) · 7. **함양**(함양읍 `35.520, 127.725`, `(74,82)`) · 8. **거창**(거창읍 `35.687, 127.910`, `(77,86)`).
+### 3.1 한국도로공사 도로살얼음 `주의`·`위험` 격상 알림 모달 (`public/ice-alert-modal.js`)
+한국도로공사 「기상청 도로살얼음 위험정보 대응방법 변경알림」 공식 기준에 맞춰 고령지사 관할(`함양IC 95.0k ~ 옥포JC 176.0k`, 8개 구간) 등급이 상향(`0/1 → 2/3` 또는 `2 → 3`)되면 즉시 차임벨과 함께 상황실 TV 최적화 팝업을 표출합니다.
+- **주의(2단계) 격상**: `⬆ 도로살얼음 위험정보 주의 격상 알림` — *"온도, 노면상태 확인 후 예비살포"* + 해당 구간 고정식 기상관측소 실시간 `[관측소] 대기온도 · 노면온도 · 노면상태` 병기 + 지도·구간카드 주황 점멸.
+- **위험(3단계) 격상**: `⬆ 도로살얼음 위험정보 위험 격상 알림` — *"예비살포 실시 (선예비살포 후상황판단회의)"* + 지도·구간카드 적색 점멸.
+- **50인치 상황실 TV 무조작 최적화**:
+  1. **1분(`60초`) 자동 닫힘 카운트다운**: `확인 (60초)` → `59초` → … → `0초` 도달 시 마우스 클릭 없이도 자동으로 닫히며, 닫힌 뒤에도 지도·카드 점멸은 해제 시까지 계속 유지됩니다.
+  2. **8개 전 구간 상단 노선 현황바 + 4칸(`4열`) 무스크롤 그리드**: 스크롤 없이 단일 화면(`4×1` 또는 `4×2`)에서 전체 발효 구간을 한눈에 확인합니다.
+  3. **동일 격상 시각 자동 그룹화 (`ICE_ALERT_STATE_KEY`)**: 같은 시각에 격상된 구간들을 하나의 시각 헤더로 묶고 신규 격상과 기존 발효 유지를 구분합니다.
 
-### 4.2 1시간 단기예보 13개 읍·면·동 (`SHORT_TERM_12_REGIONS`, `hourly.html`)
-고령지사 관내·연계 13개 읍면동을 KMA 날씨누리 공식 동네예보 대표 좌표·DFS 격자에 정합했으며, **`거창군 거창읍`과 `거창군 남하면`은 동일 격자 `(77, 86)`를 공유**하므로 실제 백엔드 API 호출은 **고유 12개 격자**만 수행합니다.
-- **고령권역**: 쌍림면(`35.6768, 128.2441`), 성산면(`35.7469, 128.3621`), 대가야읍(`35.7305, 128.2679`)
-- **합천권역**: 가야면(`35.762683, 128.139463`), 야로면(`35.7022, 128.1699`)
-- **거창권역**: 거창읍(`35.6849, 127.9060`), 남하면(`35.6647, 127.9458`), 남상면(`35.6402, 127.9122`), 가조면(`35.7080, 128.0169`)
-- **함양권역**: 수동면(`35.5191, 127.7899`), 지곡면(`35.5632, 127.7764`), 함양읍(`35.5166, 127.7288`)
-- **달성권역**: 옥포읍(`35.7866, 128.4660`)
-
-### 4.3 주요 기상·도로 판단 알고리즘
-- **비·눈 시작/종료 추정 (`analyze`, `lib/bionda-core.js`)**: 초단기(`+1~6h`) 우선 + 단기(`~12h`) 병합 시계열에서 첫 `wet` 시각을 시작으로 잡고, 이후 **연속 2시간 무강수**가 확인되는 첫 시각을 종료 추정치로 판정합니다. 구간 요약(`horizonRanges`)은 `향후 3시간(1~3h)`, `3~6시간(4~6h)`, `향후 6~12시간(7~12h)` 비중복 구간으로 분리됩니다.
-- **도로 살얼음·제설·수방 의사결정 (`iceOutlook`, `public/ice.js`)**: 실측 기온·습도·광학 노면온도(`bridgeRoadTemp`/`roadTemp`), Magnus 이슬점 차(`T - Td ≤ 1.5°C`), 야간 교량 복사냉각(`기온 - 3.0°C` 추정 vs 실측 최소값), 직전 24h 적설 후 재결빙(`≤ 0.5°C`)을 조합하여 **1시간 전 예비살포(`🚜`) / 3시간 전 시동·예열(`🔑`) / 본제설(`🚨`) / 수방·교량 횡풍(`🌊/💨`)** 4개 의사결정 카드를 생성합니다. (설정 `[⚙]`에서 지시 카드 표시 ON/OFF 전환 가능)
-- **통합 색상 등급 (`classifySeverityTier`)**: `0 평온(청록)` → `1 관심(노랑)` → `2 지시·주의(주황)` → `3 긴급·경고(빨강: 현재 눈·심한 비≥10mm/h·살얼음 주의/012선 3단계·대설/호우/태풍 특보)`로 카드·미니맵 핀·알림을 일관 색상으로 표출합니다.
-- **세부 특보구역 CAP 폴리곤 판정 (`warningMatchesPlace`)**: KMA 특보 `함양서북부` 등 세부 구역 문자열만으로는 `함양중부(지곡면)` 포함 여부를 가릴 수 없으므로 날씨누리 CAP XML 폴리곤 좌표를 ray-casting(`inPolygon`)으로 검사해 오매칭을 차단합니다.
-- **누락·부분결측 방어 (`collectShortTerm12`, `alignHourlyMatrix`)**: 병렬 조회 중 누락된 격자는 3개 단위 1회 보완 재시도하고, 전 격자의 `+1h` 시프트 여부를 `uniformStartK`로 통일합니다. 프론트엔드는 전 지역 시간 키 합집합을 기준으로 열을 고정하고 누락 지역/시간대는 `.is-missing` 플레이스홀더(`자료 누락` / `— 미수신`)로 채워 첫 행이 비어도 테이블 격자가 깨지지 않습니다.
+### 3.2 스마트 캐싱 및 2단계 강제 새로고침 (`public/page-cache.js`)
+- **`/hourly` 즉시 표출**: 브라우저 `localStorage`(`12시간`) 및 Cloudflare Edge 공유 `Last-Good` 스냅샷(`12시간`)을 통해 첫 진입·재방문 모두 직전 성공 스냅샷을 먼저 즉시 렌더링하고 백그라운드에서 최신 KMA 발표분으로 무중단 교체합니다.
+- **2단계 수동 새로고침 (`registerManualRefreshClick`)**:
+  - **1회 클릭**: 로컬 캐시를 갱신하며 서버 공유 캐시를 활용하는 스마트 새로고침.
+  - **5분 내 2회 이상 연속 클릭 (`hard=1`)**: 브라우저·Edge·Worker 메모리의 전 계층 캐시를 모두 우회해 기상청·ITS 원천 데이터를 즉시 강제 재수신(`⚡ 강제갱신` 배지 표시).
+- **24×7 상황실 보호 장치**: 10분 이상 연속 통신 실패 시 중앙 **`! 통합인증 로그인을 확인해 주세요`** 안내 모달(`net-health.js`)을 표출하며, 50인치 TV 번인 방지를 위해 3분 주기 미세 픽셀 시프트·휘도 보호(`tv-guard.js`)가 기본 작동합니다.
 
 ---
 
-## 5. 해결 완료된 주요 이슈 및 유지보수 주의사항 (필독)
+## 4. 관할 기준 지점 요약 (고령지사 프로파일)
 
-운영·개발 중 실제 발생했던 이슈와 재발 방지를 위한 핵심 체크포인트입니다.
-
-1. **`workers.dev` 사내망 차단 대응 (`Pages Functions` 프록시 + 정적 자산 패스스루)**
-   - *이슈*: 사내·기관 네트워크 방화벽에서 `*.workers.dev` TLS 연결이 차단되나 Cloudflare `*.pages.dev`는 정상 통과함. 단, 초기 `[[path]].js`가 `/api/*` 전체를 Worker로 넘겨 `public/api/*.json`·`radar.png` 정적 스냅샷이 `bionda.pages.dev`에서 `404`가 되는 문제가 있었음.
-   - *해결*: [`functions/api/[[path]].js`](functions/api/%5B%5Bpath%5D%5D.js)가 정적 자산 확장자(`.json`, `.png`, `.jpg` 등)는 `context.next()`로 통과시키고 동적 API만 Service Binding(`env.API_WORKER`)으로 Worker `bionda`에 0ms 내부 RPC 전달합니다. `DEFAULT_API_BASE`는 `https://bionda.pages.dev`를 기본 사용합니다.
-2. **Cloudflare Workers 무료 한도(6 동시연결 · 50 서브요청 · 일 10만 req) & 타임아웃 연쇄 방어**
-   - *이슈*: ① 콜드 조회 시 6개 초과 동시 아웃바운드 연결이 큐에서 대기하다 5초 타임아웃에 걸리고, ② ApiHub 전용 키로 `data.go.kr` HTTP 403 폴백을 불필요하게 재시도하며, ③ `pollWarnings()`가 분당 8회 호출 + `502` 시 CAP 18 XML 연쇄 호출을 유발함.
-   - *해결*: ① `collectShortTerm12`(`3격자` 단위) 및 `fetchOverviewBundle`(`2격자` 단위) 분할로 6연결 한도 내 타임아웃 방지, ② ApiHub 키의 `data.go.kr` `401/403` 응답 60분 스킵 캐싱 + KMA 직전 수신 `kma-stale`·특보 `wrn-now` 20분 stale 복원, ③ 특보 `/api/warnings?places=...` **1회 일괄 통합 + 2분 주기**(CAP fallback 3분 쿨다운) 및 `/api/overview-bundle`·`places` 좌표 정렬 정규화로 Edge 캐시 공유율 극대화, ④ 프런트 `overview-bundle`/`short-term-12` 타임아웃을 `26초`로 상향해 콜드 완료 전 조기 중단(`status: 0`) 차단.
-3. **`hourly`와 기상청 날씨누리 단기예보 값 차이**
-   - *이슈*: 단기예보(`getVilageFcst`, 3시간마다 발표)만 사용하면 향후 6시간 이내 기온·강수가 날씨누리 상세 화면과 다름.
-   - *해결*: 날씨누리처럼 `+1~+6시간` 구간은 **`getUltraSrtFcst`(초단기예보)** 를 우선 덮어쓰고, 전 격자 시작 시각을 `uniformStartK`로 맞췄습니다.
-4. **KMA 초단기 발표 시차(`:30` 발표 / `:35~:45` API 반영) 체감 오해 & 캐시 고착**
-   - *이슈*: 예를 들어 `06:26` 조회 시 `초단기 05:30`이 뜨고, `:35` 직후 KMA 반영이 몇 분 지연될 경우 Worker 5분 캐시가 직전 fallback(`05:30`)을 계속 붙잡을 수 있음. 또한 `[새로고침]`(`force=1`) 시 `fetchKma` 내부 격자 캐시를 우회하지 않던 문제가 있었음.
-   - *해결*: ① 미반영 fallback 응답은 캐시 TTL `45초`로 단축하고 `Cache-Control`이 `:35` 경계를 넘지 못하도록 제한, ② 매시 `HH:36:15` 자동 픽업 타이머 + `66분` 경과 자동 우회, ③ `[새로고침]` 시 **단기≥3시간(`refreshShort=1`) · 초단기>10분(`refreshUltra=1`)** 기준 `fetchKma` 내부 격자 캐시까지 직접 우회하도록 수정했습니다.
-5. **특정 지역(예: 0번 행 `쌍림면`) 일시 누락 시 `hourly` 테이블 1열 붕괴**
-   - *이슈*: `regions[0].hours` 길이를 그대로 `--hr-cols`로 쓰다 0번 행이 빈 배열일 때 전체 표가 1열로 무너짐.
-   - *해결*: `alignHourlyMatrix()`가 13개 지역의 타임스탬프 합집합으로 열 수를 산정하고 결측 칸을 `.is-missing`으로 패딩합니다.
-6. **`bionda-core.js` / `worker.js` 수정 후 Standalone 번들 동기화 필수**
-   - *주의*: Cloudflare Quick Edit용 [`dist/bionda-worker.standalone.js`](dist/bionda-worker.standalone.js)는 빌드 산출물입니다. **`lib/bionda-core.js` 또는 `cloudflare/worker.js`를 수정한 뒤에는 반드시 `npm run build:worker`를 실행**해야 `worker.test.js` 및 단독 배포본이 최신 상태를 유지합니다.
-7. **기업망 TLS 환경 및 `git.exe` 제한 환경 주의**
-   - Windows 기업 프록시 환경에서 Node `fetch` 실행 시 루트 인증서 검증을 위해 `--use-system-ca` 플래그를 사용합니다(`package.json`의 `dev`/`test`/`snapshot` 스크립트 반영됨).
-   - 동일 HTML 내에 여러 동적 SVG(`hero-scenes.js`)를 렌더링할 때는 `<linearGradient>`/`<clipPath>` ID 충돌을 막기 위해 반드시 인스턴스별 고유 ID 접두사(`uid`)를 유지해야 합니다.
+- **관할 이정 범위**: 고속국도 제12호선 광주대구선 **`함양IC(95.0k) ~ 옥포JC(176.0k)`** (8개 RWIS 콘존 `160~230`, 7개 본선 도로기상관측소 `함양 95.0k · 죽산천교 102.9k · 남상졸음 115.3k · 거창휴 134.1k · 양전교 158.2k · 논공휴 169.2k · 논공교 171.3k`) + 서쪽 선행 감시(`남원주차장 50.8k ~ 옥계1교 86.2k`).
+- **메인 상황판 8개 거점 (`presets`)**: `대구 달성군남부(현풍읍)`, `함양중부(지곡면)`, `거창군남부(남상면)`, `합천군서북부(야로면)`, `고령군(대가야읍)`, `남원(선행)`, `함양(함양읍)`, `거창(거창읍)`.
+- **1시간 단기예보 13개 읍·면·동 (`SHORT_TERM_12_REGIONS`, 서→동 노선순)**: `함양읍 → 지곡면 → 수동면 → 거창읍 → 남상면 → 남하면 → 가조면 → 가야면 → 야로면 → 쌍림면 → 대가야읍 → 성산면 → 옥포읍` (`거창읍`·`남하면` 동일 격자 `(77,86)` 공유로 고유 `12개 격자` 호출).
+- *(타 지사로 전환·확장할 때의 데이터 선정 절차는 [`docs/BRANCH_MIGRATION_GUIDE.md`](docs/BRANCH_MIGRATION_GUIDE.md)를 참고하세요.)*
 
 ---
 
-## 6. 환경변수(Secrets), 로컬 실행 및 테스트
+## 5. 환경변수(Secrets), 로컬 실행 및 테스트
 
-> **보안 원칙**: 모든 API 인증키는 코드·HTML·`localStorage`·Git 저장소에 절대 저장하지 않고 서버 환경변수(Secrets)로만 관리합니다. API허브(`apihub.kma.go.kr`) 통합 키 1개를 `KMA_SERVICE_KEY`에 등록하면 단기예보·초단기·도로관측(`var=14`)·도로위험(`roadNum=012`)·특보·HSR 레이더에 공용 적용됩니다.
+> **보안 원칙**: 모든 인증키는 코드·HTML·`localStorage`·Git 저장소에 절대 평문 저장하지 않고 서버 환경변수(Cloudflare Secrets / 로컬 `.env`)로만 주입합니다.
 
 | 환경변수 이름 | 필수 여부 | 설명 |
 | :--- | :--- | :--- |
-| `KMA_SERVICE_KEY` | **필수** | 기상청 API허브 인증키 또는 공공데이터포털 단기예보 서비스키 |
-| `KMA_RADAR_KEY` | 선택 | 레이더 HSR 별도 키 (미입력 시 `KMA_SERVICE_KEY` 자동 공용) |
-| `KMA_ROAD_KEY` | 선택 | 도로기상관측·012 위험기상 별도 키 (미입력 시 `KMA_SERVICE_KEY` 자동 공용) |
-| `ROAD_LINE_CODE` | 선택 | 고속도로 API 노선 코드 (기본 `14` = 무안광주대구선) |
-| `CORS_ORIGINS` | 선택 | 외부 정적 호스팅 허용 오리진 (예: `https://poeticecho.github.io`) |
+| `KMA_SERVICE_KEY` | **필수** | 기상청 API허브 인증키 (단기·초단기·실황·특보·레이더·도로관측 공용 가능) |
+| `KMA_ROAD_KEY` | 선택 | 도로기상관측(`road_stn_obs`)·도로위험(`road_file_down`) 별도 키 (미지정 시 `KMA_SERVICE_KEY` 사용) |
+| `KMA_RADAR_KEY` | 선택 | 레이더 합성영상 별도 키 (미지정 시 `KMA_SERVICE_KEY` 사용) |
+| `ROAD_LINE_CODE` | 선택 | 기상청 도로관측 노선코드 (기본값 `"14"` = 무안광주대구선) |
+| `ITS_API_KEY` | 선택 | 국토교통부 국가교통정보센터(ITS) 고속도로 CCTV Open API 인증키 |
+| `CCTV_SOURCE_URL` | 선택 | `openapi.its.go.kr:9443` 포트 제한 시 외부 CCTV JSON 미러 URL |
+| `RWIS_SOURCE_URL` | 선택 | 사전 추출된 경량 RWIS JSON 미러 URL (미지정 시 `rwis.kma.go.kr` 스트리밍 파싱) |
+| `CORS_ORIGINS` | 선택 | 외부 정적 미러 허용 오리진 (예: `https://poeticecho.github.io`) |
 
 ```powershell
-# 1. 개발 서버 실행 (.env는 .gitignore 제외)
+# 1. 로컬 개발 서버 실행 (Node 20+, 시스템 루트 CA 사용)
 npm run dev
 
-# 2. Cloudflare Worker 단독 배포용 번들 재생성 (core/worker 수정 시 필수)
+# 2. Cloudflare Worker 단독 배포용 번들 재생성 (lib/bionda-core.js 또는 cloudflare/worker.js 수정 시 필수!)
 npm run build:worker
 
-# 3. 전체 단위 테스트 실행 (API 모킹 · 핵심 로직 · 살얼음 · 13개소 · Worker · 히어로 시안)
+# 3. 전체 자동화 단위 테스트 실행 (98개 테스트)
 npm test
 
 # 4. 정적 폴백 스냅샷 재생성
 npm run snapshot
 ```
 
-## 아침·저녁 공유 PNG
+---
 
-봇은 [수집 안내](https://bionda.pages.dev/llms.txt)에 따라 [현재 회차 상태](https://bionda.pages.dev/share/status.json)를 먼저 조회합니다. 한국시간 08~18시에는 오전판, 18시~다음 날 08시에는 저녁판을 제공합니다. 응답이 `ready`일 때 제공되는 이미지 URL과 해시를 사용하세요. 준비 전에는 `retry_at`에 다시 조회하며, 권장 수집 시간은 각각 08~09시와 18~19시입니다.
+## 6. 아침(08시) · 저녁(18시) 정기 브리핑 PNG
 
-GitHub Actions가 매일 08:00과 18:00 KST에 생성을 예약합니다. 오전에는 당일 08시 단기예보, 저녁에는 17시 단기예보 발표를 확인합니다. 오전에는 API에 08시 발표분이 반영되는 08:20부터 조회합니다. 자료가 지연되면 예보 조회를 3분 간격으로 재시도하고, 생성에 실패하면 직전 파일을 유지합니다. 예약 실행과 Pages 배포에는 지연이 생길 수 있습니다. 워크플로 이름은 `Publish road weather PNG`이며 수동 실행도 가능합니다. 이미지 커밋에는 저장소의 Actions 쓰기 권한이 필요합니다. 같은 회차의 파일과 해시가 일치하면 재생성을 생략합니다. 게시 후 운영 주소에서 수집 안내, 회차 상태, PNG 해시를 확인합니다.
-
-대시보드·개별 지점·시간별예보 페이지의 공유 버튼은 현재 열린 자료로 브라우저에서 PNG를 만듭니다. 개별 지점 이미지는 요청한 브라우저에서만 생성합니다.
+- 외부 메신저·수집 봇은 [`llms.txt`](https://bionda.pages.dev/llms.txt) 규격에 따라 [`/share/status.json`](https://bionda.pages.dev/share/status.json)을 먼저 조회합니다(`08:00~18:00` KST = `morning`, `18:00~익일 08:00` KST = `night`).
+- GitHub Actions([`.github/workflows/share-briefing.yml`](.github/workflows/share-briefing.yml))가 매일 **`08:00 KST` (`0 23 * * *`)**와 **`18:00 KST` (`0 9 * * *`)**에 [`scripts/publish-share.py`](scripts/publish-share.py)를 실행해 `public/share/{morning,night}.{png,json}`(`200 KiB` 이하 정량화 PNG + SHA-256 영수증, 섹션명 `"기상청 시간별예보"`)을 자동 커밋·배포합니다.
+  - **유지보수 주의**: CI의 `git pull --rebase origin main` 단계에서 비스테이징 파일 충돌(`exit code 128`)이 발생하지 않도록 `publish-share.py`는 기본 실행 시 `public/share/*`만 갱신하며, `public/api/briefing.json` 갱신이 필요할 때만 `--write-briefing` 플래그를 명시합니다.
