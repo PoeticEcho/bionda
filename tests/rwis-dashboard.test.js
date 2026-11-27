@@ -965,3 +965,97 @@ test('모바일 버그 수정 검증: diagnostics.js 개별 파이프라인 진�
   assert.equal(portraitRot.sizerH, portraitRot.renderW);
   assert.ok(portraitRot.sizerW <= 390 && portraitRot.sizerH <= 640, '1배 맞춤 회전 시 세로 화면 안에 전구간이 한눈에 들어와야 함');
 });
+
+test('도로살얼음 격상 팝업 TV 고도화: 1분(60초) 카운트다운, 8개 전구간 현황바, 4칸 그리드 및 동일 격상 시각 묶음 표시를 검증한다', async () => {
+  const {
+    POPUP_AUTO_CLOSE_SEC,
+    formatConfirmCountdownText,
+    evaluateBranchIceEscalations
+  } = await import('../public/ice-alert-modal.js');
+
+  // 1) 1분(60초) 팝업 기준 및 확인 버튼 카운트다운 문자열 검증
+  assert.equal(POPUP_AUTO_CLOSE_SEC, 60);
+  assert.equal(formatConfirmCountdownText(60), '확인 (60초)');
+  assert.equal(formatConfirmCountdownText(59), '확인 (59초)');
+  assert.equal(formatConfirmCountdownText(0), '확인 (0초)');
+
+  const roadStations = [
+    { stnId: '14206', name: '함양(도)', temp: 12.9, roadTemp: 14.0, surfaceState: '건조' },
+    { stnId: '14409', name: '죽산천교(도)', temp: null, roadTemp: 13.5, surfaceState: '건조' },
+    { stnId: '14207', name: '남상졸음(도)', temp: 13.1, roadTemp: 14.8, surfaceState: '건조' },
+    { stnId: '14208', name: '거창휴(도)', temp: 14.7, roadTemp: 17.2, surfaceState: '건조' },
+    { stnId: '14209', name: '양전교(도)', temp: 14.7, roadTemp: 11.5, surfaceState: '건조' },
+    { stnId: '14103', name: '논공휴(도)', temp: 13.8, roadTemp: 14.2, surfaceState: '건조' }
+  ];
+
+  const makeZones = lvMap => [
+    { id: 'zone:160', sortOrder: 0, label: '함양IC ↔ 함양JC', kmLabel: '95.0~97.3k', inBranch: true, iceLevel: lvMap['160'] ?? 0, stnIds: ['14206'] },
+    { id: 'zone:170', sortOrder: 1, label: '함양JC ↔ 거창IC', kmLabel: '97.3~121.1k', inBranch: true, iceLevel: lvMap['170'] ?? 0, stnIds: ['14409'] },
+    { id: 'zone:180', sortOrder: 2, label: '거창IC ↔ 가조IC', kmLabel: '121.1~131.1k', inBranch: true, iceLevel: lvMap['180'] ?? 0, stnIds: ['14207'] },
+    { id: 'zone:190', sortOrder: 3, label: '가조IC ↔ 해인사IC', kmLabel: '131.1~146.4k', inBranch: true, iceLevel: lvMap['190'] ?? 0, stnIds: ['14208'] },
+    { id: 'zone:200', sortOrder: 4, label: '해인사IC ↔ 고령IC', kmLabel: '146.4~152.9k', inBranch: true, iceLevel: lvMap['200'] ?? 0, stnIds: ['14209'] },
+    { id: 'zone:210', sortOrder: 5, label: '고령IC ↔ 동고령IC', kmLabel: '152.9~165.5k', inBranch: true, iceLevel: lvMap['210'] ?? 0, stnIds: ['14209'] },
+    { id: 'zone:220', sortOrder: 6, label: '동고령IC ↔ 고령JC', kmLabel: '165.5~167.0k', inBranch: true, iceLevel: lvMap['220'] ?? 0, stnIds: ['14209'] },
+    { id: 'zone:230', sortOrder: 7, label: '고령JC ↔ 옥포JC', kmLabel: '167.0~176.0k', inBranch: true, iceLevel: lvMap['230'] ?? 0, stnIds: ['14103'] }
+  ];
+
+  const t0 = Date.parse('2026-11-27T10:20:00+09:00');
+  const boot = evaluateBranchIceEscalations({
+    prevLevels: {}, ackMap: {}, stateMap: {}, initialized: false,
+    items: makeZones({}), roadStations, tmKst: '2026-11-27T10:15:00+09:00', nowMs: t0 - 5 * 60000
+  });
+  assert.equal(boot.shouldPopup, false);
+  assert.equal(boot.corridorOverview.length, 8);
+
+  // 2) 10:20에 2개 구간(160, 180) 동시 격상 -> 1개 그룹(10:20, 4칸 그리드)
+  const wave1 = evaluateBranchIceEscalations({
+    prevLevels: boot.nextLevels,
+    ackMap: boot.nextAckMap,
+    stateMap: boot.nextStateMap,
+    initialized: true,
+    items: makeZones({ '160': 2, '180': 2 }),
+    roadStations,
+    tmKst: '2026-11-27T10:20:00+09:00',
+    nowMs: t0
+  });
+  assert.equal(wave1.shouldPopup, true);
+  assert.equal(wave1.escalationGroups.length, 1);
+  assert.equal(wave1.escalationGroups[0].escalatedAt, '2026-11-27 10:20');
+  assert.equal(wave1.escalationGroups[0].spanCols, 4);
+  assert.equal(wave1.escalationGroups[0].innerCols, 4);
+
+  // 1분 자동 닫힘(Ack 기록) 시뮬레이션
+  const ackAfterWave1 = {
+    'zone:160': { level: 2, atMs: t0 + 60000 },
+    'zone:180': { level: 2, atMs: t0 + 60000 }
+  };
+
+  // 3) 10:35에 나머지 2개 구간(190, 200) 추가 격상 -> 10:35 신규 그룹(2칸) + 10:20 기존 유지 그룹(2칸) = 1줄 4칸 동시 표출!
+  const wave2 = evaluateBranchIceEscalations({
+    prevLevels: wave1.nextLevels,
+    ackMap: ackAfterWave1,
+    stateMap: wave1.nextStateMap,
+    initialized: true,
+    items: makeZones({ '160': 2, '180': 2, '190': 2, '200': 2 }),
+    roadStations,
+    tmKst: '2026-11-27T10:35:00+09:00',
+    nowMs: t0 + 15 * 60000
+  });
+  assert.equal(wave2.shouldPopup, true);
+  assert.equal(wave2.corridorOverview.length, 8);
+  assert.equal(wave2.activeItems.length, 4);
+  assert.equal(wave2.triggeredItems.length, 2);
+  assert.equal(wave2.escalationGroups.length, 2);
+
+  // 첫 번째 그룹: 10:35 신규 동시 격상 2구간 (span 2)
+  assert.equal(wave2.escalationGroups[0].escalatedAt, '2026-11-27 10:35');
+  assert.equal(wave2.escalationGroups[0].hasNew, true);
+  assert.equal(wave2.escalationGroups[0].spanCols, 2);
+  assert.deepEqual(wave2.escalationGroups[0].items.map(x => x.id), ['zone:190', 'zone:200']);
+
+  // 두 번째 그룹: 10:20 기존 발효 유지 2구간 (span 2) — 기존 격상 시각이 보존됨!
+  assert.equal(wave2.escalationGroups[1].escalatedAt, '2026-11-27 10:20');
+  assert.equal(wave2.escalationGroups[1].hasNew, false);
+  assert.equal(wave2.escalationGroups[1].spanCols, 2);
+  assert.deepEqual(wave2.escalationGroups[1].items.map(x => x.id), ['zone:160', 'zone:180']);
+});
