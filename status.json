@@ -1,13 +1,10 @@
 {
-  "checkedAt": "2026-11-27T09:36:18.217Z",
+  "checkedAt": "2026-11-27T18:51:21.010Z",
   "night": "2026-11-27",
   "received": {
-    "areas": 12,
+    "areas": 13,
     "stations": 20
   },
-  "errors": [
-    "jigok · 실황 시각 또는 값 누락",
-    "시간별예보 · The operation was aborted due to timeout"
-  ],
+  "errors": [],
   "delayed": []
 }
