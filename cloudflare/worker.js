@@ -38,6 +38,7 @@ import {
   parseRoadRiskCsv,
   buildRoadRiskPayload,
   matchStationRiskForCoord,
+  alignShortTermSnapshotToNow,
   collectShortTerm12,
   parseOverviewPlacesParam,
   canonicalOverviewPlacesKey,
@@ -82,6 +83,15 @@ function rewriteRwisRequest(request, url, prefix) {
 const SHARED_CACHE = new Map();
 const INFLIGHT = new Map();
 const REQUESTS = new Map();
+const WORKER_HOURLY_LAST_GOOD_URL = 'https://bionda-edge-cache.internal/__worker_hourly_v2/last-good/r13';
+let workerHourlyRevalidateUntil = 0;
+
+function shortTerm12FreshCacheKey(nowMs = Date.now()) {
+  const sBase = baseShort(nowMs);
+  const uBase = baseUltra(nowMs);
+  const curHour = timePart(kst(nowMs)).slice(0, 2);
+  return `short12|${datePart(sBase)}|${timePart(sBase)}|${timePart(uBase)}|h${curHour}`;
+}
 
 function getCached(key) {
   const item = SHARED_CACHE.get(key);
@@ -325,7 +335,7 @@ async function fetchShortTerm12(env, optionsOrForce = false) {
   const sBase = baseShort(now);
   const uBase = baseUltra(now);
   const curHour = timePart(kst(now)).slice(0, 2);
-  const cacheKey = `short12|${datePart(sBase)}|${timePart(sBase)}|${timePart(uBase)}|h${curHour}`;
+  const cacheKey = shortTerm12FreshCacheKey(now);
   const hit = !bypassTop ? getCached(cacheKey) : null;
   if (hit) return hit;
 
@@ -376,8 +386,16 @@ async function fetchShortTerm12(env, optionsOrForce = false) {
 
     const completeRegions = (payload.regions || []).filter(r => Array.isArray(r.hours) && r.hours.length > 0).length;
     const isMixed = Boolean(payload.sources?.mixedGeneration);
-    if (completeRegions >= 13 && !isMixed && payload.sources?.shortBase) {
-      setCached(verifiedKey, payload, 3 * 3600000);
+    if (completeRegions >= 13 && payload.sources?.shortBase) {
+      if (!isMixed) {
+        setCached(verifiedKey, payload, 3 * 3600000);
+      }
+      const prevGood = getCached('short12-global-last-good');
+      const prevGoodMs = Date.parse(prevGood?.sources?.shortBase || '');
+      const nextGoodMs = Date.parse(payload.sources.shortBase || '');
+      if (!prevGood || !isMixed || !Number.isFinite(prevGoodMs) || nextGoodMs >= prevGoodMs) {
+        setCached('short12-global-last-good', payload, 12 * 3600000);
+      }
     }
     const pendingShort = !payload.sources?.shortBase || Date.parse(payload.sources.shortBase) < Date.parse(isoKst(sBase));
     const pendingUltra = !resolvedUBase || resolvedUBase.getTime() < uBase.getTime();
@@ -1253,6 +1271,7 @@ export function __resetWorkerCaches() {
   SHARED_CACHE.clear();
   INFLIGHT.clear();
   REQUESTS.clear();
+  workerHourlyRevalidateUntil = 0;
 }
 
 export default {
@@ -1378,11 +1397,12 @@ export default {
       });
     }
 
-    // Check Edge Cache API (normalized radar key unless force / hard / refresh / refreshShort / refreshUltra)
+    // Check Edge Cache API (normalized radar key unless force / hard / refresh / refreshShort / refreshUltra / revalidate)
     const isForced = requestUrl.searchParams.get('force') === '1' || requestUrl.searchParams.get('refresh') === '1';
     const isHard = requestUrl.searchParams.get('hard') === '1';
+    const isRevalidate = requestUrl.searchParams.get('revalidate') === '1';
     const bypassNow = isForced || isHard;
-    const bypassEdge = bypassNow || requestUrl.searchParams.get('refreshShort') === '1' || requestUrl.searchParams.get('refreshUltra') === '1';
+    const bypassEdge = bypassNow || isRevalidate || requestUrl.searchParams.get('refreshShort') === '1' || requestUrl.searchParams.get('refreshUltra') === '1';
     const cacheKeyReq = edgeCacheRequest(requestUrl, pathname === '/api/radar');
     if (!bypassEdge) {
       const edgeHit = await matchEdgeCache(request, env, cacheKeyReq);
@@ -1434,12 +1454,11 @@ export default {
       if (!getServiceKey(env)) {
         return jsonResponse(request, env, 503, { code: 'KEY_MISSING', error: '운영자가 기상청 예보 API 키를 등록하지 않았습니다.' });
       }
-      try {
-        const rsParam = requestUrl.searchParams.get('refreshShort');
-        const ruParam = requestUrl.searchParams.get('refreshUltra');
-        const refreshShort = isHard ? true : (rsParam !== null ? rsParam === '1' : isForced);
-        const refreshUltra = isHard ? true : (ruParam !== null ? ruParam === '1' : isForced);
-        const value = await fetchShortTerm12(env, { force: bypassNow, refreshShort, refreshUltra });
+      const ua = request.headers.get('user-agent') || '';
+      const isArchivalBot = /Bionda-(Night-Weather|Briefing)/i.test(ua);
+      const lastGoodEdgeReq = new Request(WORKER_HOURLY_LAST_GOOD_URL);
+      const computeAndCacheFreshShort12 = async ({ force = false, refreshShort = false, refreshUltra = false, hard = false } = {}) => {
+        const value = await fetchShortTerm12(env, { force, refreshShort, refreshUltra, hard });
         const nowMs = Date.now();
         const kstMin = kst(nowMs).getUTCMinutes();
         const secsToHour = Math.max(5, Math.ceil((3600000 - (nowMs % 3600000)) / 1000));
@@ -1451,16 +1470,89 @@ export default {
         const pendingUltraRelease = !value?.sources?.ultraBase || Date.parse(value.sources.ultraBase) < Date.parse(expectedUltraIso);
         const completeRegions = (value?.regions || []).filter(r => Array.isArray(r.hours) && r.hours.length > 0).length;
         const isMixed = Boolean(value?.sources?.mixedGeneration);
-        const capSec = (pendingShortRelease || pendingUltraRelease) ? 45 : 300;
-        const maxAge = Math.min(180, secsToHour, minsPast35, capSec);
+        const capSec = (pendingShortRelease || pendingUltraRelease || isMixed) ? 45 : 300;
+        const maxAge = Math.min(isMixed ? 30 : 180, secsToHour, minsPast35, capSec);
         const sMaxAge = Math.min(300, secsToHour, minsPast35, capSec);
-        const bypassAllCache = bypassNow || refreshShort || refreshUltra || completeRegions < 13 || isMixed;
-        const res = jsonResponse(request, env, 200, value, {
-          'Cache-Control': bypassAllCache ? 'no-store' : `public, max-age=${maxAge}, s-maxage=${sMaxAge}, stale-while-revalidate=60`
+        if (completeRegions >= 13) {
+          putEdgeCache(ctx, lastGoodEdgeReq, new Response(JSON.stringify(value), {
+            status: 200,
+            headers: { 'Content-Type': 'application/json; charset=utf-8', 'Cache-Control': 'public, max-age=43200, s-maxage=43200' }
+          }));
+        }
+        return { value, maxAge, sMaxAge, completeRegions, isMixed };
+      };
+
+      // Fresh 캐시 미적중 시: 직전 성공 공유 스냅샷(Last-Good)을 즉시 반환(<50ms)하고 백그라운드에서 KMA 최신화
+      const hasFreshMem = !bypassEdge && Boolean(getCached(shortTerm12FreshCacheKey(Date.now())));
+      if (!bypassEdge && !hasFreshMem && !isArchivalBot) {
+        let lastGood = getCached('short12-global-last-good');
+        if (!lastGood) {
+          try {
+            const edgeSnap = await globalThis.caches?.default?.match(lastGoodEdgeReq);
+            if (edgeSnap) {
+              lastGood = await edgeSnap.json();
+              if (lastGood?.ok) setCached('short12-global-last-good', lastGood, 12 * 3600000);
+            }
+          } catch {}
+        }
+        const nowMs = Date.now();
+        const aligned = lastGood ? alignShortTermSnapshotToNow(lastGood, nowMs, { maxAgeMs: 12 * 3600000 }) : null;
+        if (aligned) {
+          if (ctx && typeof ctx.waitUntil === 'function' && nowMs >= workerHourlyRevalidateUntil) {
+            workerHourlyRevalidateUntil = nowMs + 25000;
+            const freshEdgeKey = edgeCacheRequest(new URL('https://bionda-edge-cache.internal/api/short-term-12?roster=13'), false);
+            ctx.waitUntil((async () => {
+              try {
+                const { value, maxAge, sMaxAge, completeRegions, isMixed } = await computeAndCacheFreshShort12({ force: false });
+                if (completeRegions >= 13 && !isMixed) {
+                  putEdgeCache(null, freshEdgeKey, jsonResponse(request, env, 200, value, {
+                    'Cache-Control': `public, max-age=${maxAge}, s-maxage=${sMaxAge}, stale-while-revalidate=60`
+                  }));
+                }
+              } catch {} finally {
+                workerHourlyRevalidateUntil = 0;
+              }
+            })());
+          }
+          return jsonResponse(request, env, 200, aligned, {
+            'Cache-Control': 'public, max-age=5, s-maxage=15',
+            'X-Bionda-Cache': 'HIT-LAST-GOOD-SWR'
+          });
+        }
+      }
+
+      try {
+        const rsParam = requestUrl.searchParams.get('refreshShort');
+        const ruParam = requestUrl.searchParams.get('refreshUltra');
+        const refreshShort = isHard ? true : (rsParam !== null ? rsParam === '1' : isForced);
+        const refreshUltra = isHard ? true : (ruParam !== null ? ruParam === '1' : isForced);
+        const { value, maxAge, sMaxAge, completeRegions, isMixed } = await computeAndCacheFreshShort12({
+          force: bypassNow,
+          refreshShort,
+          refreshUltra,
+          hard: isHard
         });
-        if (!bypassAllCache) putEdgeCache(ctx, cacheKeyReq, res);
+        const bypassAllCache = bypassNow || refreshShort || refreshUltra || completeRegions < 13;
+        const freshCacheReq = isRevalidate
+          ? edgeCacheRequest(new URL('https://bionda-edge-cache.internal/api/short-term-12?roster=13'), false)
+          : cacheKeyReq;
+        const res = jsonResponse(request, env, 200, value, {
+          'Cache-Control': bypassAllCache ? 'no-store' : `public, max-age=${maxAge}, s-maxage=${sMaxAge}, stale-while-revalidate=60`,
+          'X-Bionda-Cache': isRevalidate ? 'REVALIDATED' : (bypassAllCache ? 'BYPASS' : 'MISS-SEED')
+        });
+        if (!bypassAllCache) putEdgeCache(ctx, freshCacheReq, res);
         return res;
       } catch (e) {
+        if (!bypassNow) {
+          const fallbackSnap = getCached('short12-global-last-good');
+          const aligned = fallbackSnap ? alignShortTermSnapshotToNow(fallbackSnap, Date.now(), { maxAgeMs: 12 * 3600000 }) : null;
+          if (aligned) {
+            return jsonResponse(request, env, 200, aligned, {
+              'Cache-Control': 'no-store',
+              'X-Bionda-Cache': 'FALLBACK-LAST-GOOD'
+            });
+          }
+        }
         return jsonResponse(request, env, 502, { error: errMessage(e) });
       }
     }

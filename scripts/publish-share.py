@@ -70,7 +70,8 @@ def live_data(slot, now, places):
             if not short_base:
                 raise ValueError("No KMA short-term release time in /api/short-term-12")
             issued = datetime.fromisoformat(short_base)
-            if (issued >= expected and len(forecast["regions"]) == 13
+            min_acceptable = expected - timedelta(hours=3) if attempt == 6 else expected
+            if (issued >= min_acceptable and len(forecast["regions"]) == 13
                     and any(r.get("hours") for r in forecast["regions"])):
                 break
             raise ValueError(f"Expected release {expected.isoformat()}, got {issued.isoformat()}, {len(forecast['regions'])} regions")
@@ -239,6 +240,11 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--slot", choices=("morning", "night"))
     parser.add_argument("--bootstrap", action="store_true")
+    parser.add_argument(
+        "--write-briefing",
+        action="store_true",
+        help="Also write public/api/briefing.json (disabled by default so CI git pull --rebase stays clean)",
+    )
     parser.add_argument("--verify-edition", help="Check the edition at the public bot URLs after deployment")
     args = parser.parse_args()
     if args.verify_edition:
@@ -275,6 +281,6 @@ if __name__ == "__main__":
         "bytes": len(png), "sha256": sha256_hex,
     }
     output.with_suffix(".json").write_text(json.dumps(metadata) + "\n", encoding="utf-8")
-    if not args.bootstrap:
+    if not args.bootstrap and args.write_briefing:
         write_briefing_json(prepared, edition_id, slot, generated_iso, len(png), sha256_hex)
     print(f"{output.name}: {len(png):,} bytes")

@@ -50,6 +50,7 @@ const {
   parseRoadRiskCsv,
   buildRoadRiskPayload,
   matchStationRiskForCoord,
+  alignShortTermSnapshotToNow,
   collectShortTerm12,
   parseOverviewPlacesParam,
   canonicalOverviewPlacesKey,
@@ -307,6 +308,7 @@ async function fetchShortTerm12(optionsOrForce = false) {
     const isMixed = Boolean(payload.sources?.mixedGeneration);
     if (completeRegions >= 13 && !isMixed && payload.sources?.shortBase) {
       setCached(verifiedKey, payload, 3 * 3600000);
+      setCached('short12-global-last-good', payload, 12 * 3600000);
     }
     const pendingShort = !payload.sources?.shortBase || Date.parse(payload.sources.shortBase) < Date.parse(isoKst(sBase));
     const pendingUltra = !resolvedUBase || resolvedUBase.getTime() < uBase.getTime();
@@ -1081,10 +1083,30 @@ const server = http.createServer(async (req, res) => {
       try {
         const isForced = requestUrl.searchParams.get('force') === '1' || requestUrl.searchParams.get('refresh') === '1';
         const isHard = requestUrl.searchParams.get('hard') === '1';
+        const isRevalidate = requestUrl.searchParams.get('revalidate') === '1';
         const rsParam = requestUrl.searchParams.get('refreshShort');
         const ruParam = requestUrl.searchParams.get('refreshUltra');
         const refreshShort = isHard ? true : (rsParam !== null ? rsParam === '1' : isForced);
         const refreshUltra = isHard ? true : (ruParam !== null ? ruParam === '1' : isForced);
+        const bypassAll = isForced || isHard || isRevalidate || refreshShort || refreshUltra;
+
+        const nowCheck = Date.now();
+        const sCheck = baseShort(nowCheck);
+        const uCheck = baseUltra(nowCheck);
+        const hCheck = timePart(kst(nowCheck)).slice(0, 2);
+        const freshKey = `short12|${datePart(sCheck)}|${timePart(sCheck)}|${timePart(uCheck)}|h${hCheck}`;
+        if (!bypassAll && !getCached(freshKey)) {
+          const lastGood = getCached('short12-global-last-good');
+          const aligned = lastGood ? alignShortTermSnapshotToNow(lastGood, nowCheck, { maxAgeMs: 12 * 3600000 }) : null;
+          if (aligned) {
+            fetchShortTerm12({ force: false }).catch(() => {});
+            return sendJson(res, 200, aligned, {
+              'Cache-Control': 'public, max-age=5, s-maxage=15',
+              'X-Bionda-Cache': 'HIT-LAST-GOOD-SWR'
+            });
+          }
+        }
+
         const value = await fetchShortTerm12({ force: isForced || isHard, refreshShort, refreshUltra });
         const nowMs = Date.now();
         const kstMin = kst(nowMs).getUTCMinutes();

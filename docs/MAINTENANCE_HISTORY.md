@@ -78,6 +78,11 @@
   - **1분(`60초`) 자동 닫힘 카운트다운**: 확인 버튼에 `확인 (60초)` → `확인 (59초)` → ... → `확인 (0초)` 실시간 카운트다운 및 하단 진행바를 적용하여 마우스 조작이 없는 상황실 TV에서도 1분 표출 후 자동으로 닫히며 지도·카드 점멸은 계속 유지되도록 개선.
   - **8개 감시 전 구간 상단 현황바 + 4칸(`4열`) 무스크롤 그리드**: `함양IC(95.0k)~옥포JC(176.0k)` 8개 전 구간 상태를 한눈에 보는 상단 노선 바를 추가하고, 상세 카드를 4칸 그리드로 확장하여 최대 8개 구간 동시 발효 시에도 스크롤 없이 한 화면(`4×2`)에 표출.
   - **동일 격상 시각 묶음 및 격상 시각 보존 (`ICE_ALERT_STATE_KEY`)**: 구간별 최초 격상 시각(`예: 2026-11-27 10:35`)을 보존하고 동일 시각에 변경된 구간들을 하나의 시간 그룹 박스로 묶어 신규 동시 격상과 기존 발효 유지 구간을 명확히 구분 표시.
+- **실운영 모니터링 4대 개선 (`/hourly` 공유 Last-Good 즉시표출 · ICON 앙상블 기온 정합성 · `SFS=14` 습기 코드 · `night.png` 발행 복구)**:
+  - **`/hourly` 2계층 공유 Last-Good 스냅샷 + 백그라운드 SWR (`hourly-roster.mjs`, `functions/api/[[path]].js`, `worker.js`, `hourly.js`, `bionda-core.js`)**: 누구든 마지막 접속 중 성공한 13개소 스냅샷을 Cloudflare Edge(`__pages_hourly_v2/last-good/r13`, 12시간 TTL)와 브라우저 `localStorage`(`12시간`)에 보존하고, Fresh 캐시 만료 시에도 현재 시각으로 시간열·요약을 정렬(`alignShortTermSnapshotToNow`)해 **`< 0.1초` 즉시 반환**한 뒤 `context.waitUntil` 및 `revalidate=1`로 백그라운드 최신화 수행 (콜드 `7~11초` 체감 대기 해소 및 `mixedGeneration` 시 전 계층 캐시 비활성화 병목 제거).
+  - **`"앞으로 6시간 (ICON 앙상블)"` 기온 `3.5°C` 괴리 해소 (`weather.js`, `index.html`)**: `ensemble` 엔드포인트(`hourly=rain,snowfall`)에는 기온이 없고 Open-Meteo 광역 격자(`7.6~7.7°C`)가 산간 복사냉각(`4~5°C`)을 반영하지 못하던 원인을 규명하여, 6시간 표와 살얼음 판정 엔진 모두 기상청 시간별 예보 기온·습도·풍속을 병합(원본은 `omTemp` 보존)하도록 통일.
+  - **기상청 도로기상관측 공식 `SFS` 노면상태 전 코드 정립 및 `SFS=14(습기)` 오표기·오경보 수정 (`bionda-core.js`, `ice.js`, `rwis-data.js`, `rwis.js`, `minimap.js`, `history-72h.js`)**: 공식 코드(`1:건조`, `2:습윤`, `3:적설`, `4:결빙`, `10:저시정`, `11:수막`, `12:화학습윤`, `13:임계습윤`, `14:습기`, `15:눈·결빙`)를 정립하고, 영상 온도에서 `SFS=14(습기)`가 `'관측중'` 및 `surfaceCode >= 4` 적색 결빙 경보로 오표기되던 버그를 수정(저온 `≤2°C` 시에만 예비살포 알림 작동, 구간 내 복수 관측소는 위험도 순위 `sfsSeverity`로 대표 상태 선정).
+  - **`night.png` / `morning.png` 정기 브리핑 발행 복구 (`publish-share.py`)**: GitHub Actions `share-briefing.yml` 실행 중 `public/api/briefing.json`이 비스테이징 상태로 남아 `git pull --rebase origin main`이 `exit code 128`로 중단되던 원인을 찾아 `--write-briefing` 명시 플래그로 분리하고, 현행 `morning.png`(`2026-11-27-morning`)·`night.png`(`2026-11-26-night`) 최신 본을 즉시 재생성·반영.
 
 ---
 

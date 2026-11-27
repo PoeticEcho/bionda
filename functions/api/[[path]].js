@@ -1,7 +1,7 @@
 import { alignBoundForecast } from '../../lib/bound-forecast.mjs';
 import { servePagesCctv } from '../../lib/cctv-pages.mjs';
 import { getServiceKey } from '../../lib/bionda-core.js';
-import { completeBoundHourlyResponse } from '../../lib/hourly-roster.mjs';
+import { completeBoundHourlyResponse, servePagesShortTerm12 } from '../../lib/hourly-roster.mjs';
 import worker from '../../cloudflare/worker.js';
 
 /**
@@ -35,7 +35,7 @@ export async function onRequest(context) {
         }
         return completeBoundHourlyResponse(await service.fetch(request), request, service);
       }
-      if (comparison) return loadComparison(context.request);
+      if (comparison) return servePagesShortTerm12(context, loadComparison);
       if (getServiceKey(context.env) && (!bundle || context.env.KMA_ROAD_KEY)) {
         const local = await worker.fetch(context.request, context.env, context);
         if (local.ok) return local;

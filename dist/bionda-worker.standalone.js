@@ -318,12 +318,54 @@ const ROUTE12_MILEPOST_BY_STN = {
 const SURFACE_STATES = {
   1: '건조',
   2: '습윤',
-  3: '수막',
-  4: '적설',
-  5: '결빙',
+  3: '적설',
+  4: '결빙',
+  5: '서리',
   6: '슬러시',
-  7: '소금물'
+  7: '습윤(제설제)',
+  10: '저시정',
+  11: '수막',
+  12: '화학습윤',
+  13: '임계습윤',
+  14: '습기',
+  15: '눈·결빙'
 };
+
+const ICE_SURFACE_CODES = new Set([4, 5, 13, 15]);
+const SNOW_SURFACE_CODES = new Set([3, 6]);
+const MOIST_SURFACE_CODES = new Set([2, 3, 4, 5, 6, 7, 11, 12, 13, 14, 15]);
+const SURFACE_HAZARD_CODES = new Set([3, 4, 5, 6, 11, 13, 15]);
+const SURFACE_SEVERITY_RANK = {
+  1: 1,  // 건조
+  10: 2, // 저시정
+  14: 3, // 습기 (Damp)
+  7: 4,  // 습윤(제설제)
+  12: 4, // 화학습윤
+  2: 5,  // 습윤
+  11: 6, // 수막
+  3: 7,  // 적설
+  6: 7,  // 슬러시
+  5: 8,  // 서리
+  13: 8, // 임계습윤
+  4: 9,  // 결빙
+  15: 9  // 눈·결빙
+};
+
+function isIceSurfaceCode(code) {
+  return ICE_SURFACE_CODES.has(Number(code));
+}
+
+function isSnowSurfaceCode(code) {
+  return SNOW_SURFACE_CODES.has(Number(code));
+}
+
+function isMoistSurfaceCode(code) {
+  return MOIST_SURFACE_CODES.has(Number(code));
+}
+
+function surfaceSeverityRank(code) {
+  return SURFACE_SEVERITY_RANK[Number(code)] || 0;
+}
 
 function parseRoadStations(rawText) {
   const stations = [];
@@ -475,7 +517,7 @@ function mergeObservationResult(roadMatch, kmaNcst) {
     humidity: roadMatch.humidity ?? kmaNcst?.humidity ?? null,
     dayPrecip: roadMatch.dayPrecip ?? kmaNcst?.dayPrecip ?? 0,
     windSpeed: roadMatch.windSpeed ?? kmaNcst?.windSpeed ?? null,
-    description: kmaNcst?.description || (roadMatch.surfaceCode >= 4 ? `노면 ${roadMatch.surfaceState}` : null)
+    description: kmaNcst?.description || (SURFACE_HAZARD_CODES.has(Number(roadMatch.surfaceCode)) ? `노면 ${roadMatch.surfaceState}` : null)
   } : {
     name: kmaNcst.name,
     roadName: null,
@@ -1310,6 +1352,63 @@ function buildShortTerm12Payload({ now = Date.now(), regionResults = [] }) {
   };
 }
 
+function alignShortTermSnapshotToNow(payload, nowMs = Date.now(), { maxAgeMs = 12 * 3600000 } = {}) {
+  if (!payload || !payload.ok || !Array.isArray(payload.regions) || !payload.regions.length) {
+    return null;
+  }
+  const updatedMs = Date.parse(payload.updatedAt || '');
+  if (Number.isFinite(updatedMs) && (nowMs - updatedMs) > maxAgeMs) {
+    return null;
+  }
+
+  const startK = forecastWindowStart(nowMs);
+  const startIso = isoKst(startK);
+  const startMs = Date.parse(startIso);
+  const todayDayNum = kst(nowMs).getUTCDate();
+
+  const alignedRegions = payload.regions.map(r => {
+    const filtered = (Array.isArray(r?.hours) ? r.hours : []).filter(h => {
+      const hm = Date.parse(h?.time || '');
+      return Number.isFinite(hm) && hm >= startMs;
+    });
+    const hours = filtered.map((h, idx) => ({
+      ...h,
+      offset: idx,
+      isTomorrow: h.dayNum !== todayDayNum
+    }));
+    return {
+      ...r,
+      windowStart: startIso,
+      hours,
+      summaries: {
+        h6: summarizeHourlyWindow(hours.filter(h => h.offset < 6)),
+        h12: summarizeHourlyWindow(hours.filter(h => h.offset < 12)),
+        h24: summarizeHourlyWindow(hours.filter(h => h.offset < 24)),
+        tomorrow: summarizeHourlyWindow(hours)
+      }
+    };
+  });
+
+  const validRegions = alignedRegions.filter(r => r.hours.length >= 6).length;
+  if (validRegions < 12) return null;
+
+  const rebuilt = buildShortTerm12Payload({
+    now: Number.isFinite(updatedMs) ? updatedMs : nowMs,
+    regionResults: alignedRegions
+  });
+  return {
+    ...payload,
+    ...rebuilt,
+    updatedAt: payload.updatedAt || rebuilt.updatedAt,
+    sources: {
+      ...rebuilt.sources,
+      ...(payload.sources || {}),
+      servedFromLastGood: true,
+      revalidating: true
+    }
+  };
+}
+
 async function collectShortTerm12({ now = Date.now(), fetchShort, fetchUltra }) {
   // 13개 읍·면·동을 고유 격자(nx, ny) 기준으로 중복 제거(거창읍·남하면 공유 → 12개 고유 격자)해 KMA 호출량을 최소화
   const uniqueGrids = new Map();
@@ -1531,10 +1630,10 @@ function classifyPresaltConditionRow({ temp = null, roadTemp = null, surfaceCode
   const sc = Number.isFinite(surfaceCode) ? surfaceCode : Number(surfaceCode || 0);
   const rn = Number.isFinite(dayPrecip) ? dayPrecip : 0;
 
-  if (sc === 5) return { flag: 'ice', label: '실측결빙' };
-  if (sc === 6) return { flag: 'snow', label: '적설·슬러시' };
-  if (sc === 4 && tr !== null && tr <= 2.0) return { flag: 'frost', label: '서리(노면≤2℃)' };
-  if (tr !== null && tr <= 2.0 && (ta === null || ta <= 4.0) && ((sc >= 2 && sc <= 6) || rn > 0)) {
+  if (sc === 4 || sc === 15) return { flag: 'ice', label: '실측결빙' };
+  if (sc === 3 || sc === 6) return { flag: 'snow', label: '적설·슬러시' };
+  if ((sc === 5 || sc === 13) && (tr === null || tr <= 2.0)) return { flag: 'frost', label: sc === 13 ? '임계습윤(결빙임박)' : '서리(노면≤2℃)' };
+  if (tr !== null && tr <= 2.0 && (ta === null || ta <= 4.0) && (isMoistSurfaceCode(sc) || rn > 0)) {
     return { flag: 'presalt', label: '예비살포조건(저온습윤)' };
   }
   if (tr !== null && tr <= 0.0) return { flag: 'subzero', label: '노면영하(건조)' };
@@ -3281,6 +3380,15 @@ function rewriteRwisRequest(request, url, prefix) {
 const SHARED_CACHE = new Map();
 const INFLIGHT = new Map();
 const REQUESTS = new Map();
+const WORKER_HOURLY_LAST_GOOD_URL = 'https://bionda-edge-cache.internal/__worker_hourly_v2/last-good/r13';
+let workerHourlyRevalidateUntil = 0;
+
+function shortTerm12FreshCacheKey(nowMs = Date.now()) {
+  const sBase = baseShort(nowMs);
+  const uBase = baseUltra(nowMs);
+  const curHour = timePart(kst(nowMs)).slice(0, 2);
+  return `short12|${datePart(sBase)}|${timePart(sBase)}|${timePart(uBase)}|h${curHour}`;
+}
 
 function getCached(key) {
   const item = SHARED_CACHE.get(key);
@@ -3524,7 +3632,7 @@ async function fetchShortTerm12(env, optionsOrForce = false) {
   const sBase = baseShort(now);
   const uBase = baseUltra(now);
   const curHour = timePart(kst(now)).slice(0, 2);
-  const cacheKey = `short12|${datePart(sBase)}|${timePart(sBase)}|${timePart(uBase)}|h${curHour}`;
+  const cacheKey = shortTerm12FreshCacheKey(now);
   const hit = !bypassTop ? getCached(cacheKey) : null;
   if (hit) return hit;
 
@@ -3575,8 +3683,16 @@ async function fetchShortTerm12(env, optionsOrForce = false) {
 
     const completeRegions = (payload.regions || []).filter(r => Array.isArray(r.hours) && r.hours.length > 0).length;
     const isMixed = Boolean(payload.sources?.mixedGeneration);
-    if (completeRegions >= 13 && !isMixed && payload.sources?.shortBase) {
-      setCached(verifiedKey, payload, 3 * 3600000);
+    if (completeRegions >= 13 && payload.sources?.shortBase) {
+      if (!isMixed) {
+        setCached(verifiedKey, payload, 3 * 3600000);
+      }
+      const prevGood = getCached('short12-global-last-good');
+      const prevGoodMs = Date.parse(prevGood?.sources?.shortBase || '');
+      const nextGoodMs = Date.parse(payload.sources.shortBase || '');
+      if (!prevGood || !isMixed || !Number.isFinite(prevGoodMs) || nextGoodMs >= prevGoodMs) {
+        setCached('short12-global-last-good', payload, 12 * 3600000);
+      }
     }
     const pendingShort = !payload.sources?.shortBase || Date.parse(payload.sources.shortBase) < Date.parse(isoKst(sBase));
     const pendingUltra = !resolvedUBase || resolvedUBase.getTime() < uBase.getTime();
@@ -4452,6 +4568,7 @@ export function __resetWorkerCaches() {
   SHARED_CACHE.clear();
   INFLIGHT.clear();
   REQUESTS.clear();
+  workerHourlyRevalidateUntil = 0;
 }
 
 export default {
@@ -4577,11 +4694,12 @@ export default {
       });
     }
 
-    // Check Edge Cache API (normalized radar key unless force / hard / refresh / refreshShort / refreshUltra)
+    // Check Edge Cache API (normalized radar key unless force / hard / refresh / refreshShort / refreshUltra / revalidate)
     const isForced = requestUrl.searchParams.get('force') === '1' || requestUrl.searchParams.get('refresh') === '1';
     const isHard = requestUrl.searchParams.get('hard') === '1';
+    const isRevalidate = requestUrl.searchParams.get('revalidate') === '1';
     const bypassNow = isForced || isHard;
-    const bypassEdge = bypassNow || requestUrl.searchParams.get('refreshShort') === '1' || requestUrl.searchParams.get('refreshUltra') === '1';
+    const bypassEdge = bypassNow || isRevalidate || requestUrl.searchParams.get('refreshShort') === '1' || requestUrl.searchParams.get('refreshUltra') === '1';
     const cacheKeyReq = edgeCacheRequest(requestUrl, pathname === '/api/radar');
     if (!bypassEdge) {
       const edgeHit = await matchEdgeCache(request, env, cacheKeyReq);
@@ -4633,12 +4751,11 @@ export default {
       if (!getServiceKey(env)) {
         return jsonResponse(request, env, 503, { code: 'KEY_MISSING', error: '운영자가 기상청 예보 API 키를 등록하지 않았습니다.' });
       }
-      try {
-        const rsParam = requestUrl.searchParams.get('refreshShort');
-        const ruParam = requestUrl.searchParams.get('refreshUltra');
-        const refreshShort = isHard ? true : (rsParam !== null ? rsParam === '1' : isForced);
-        const refreshUltra = isHard ? true : (ruParam !== null ? ruParam === '1' : isForced);
-        const value = await fetchShortTerm12(env, { force: bypassNow, refreshShort, refreshUltra });
+      const ua = request.headers.get('user-agent') || '';
+      const isArchivalBot = /Bionda-(Night-Weather|Briefing)/i.test(ua);
+      const lastGoodEdgeReq = new Request(WORKER_HOURLY_LAST_GOOD_URL);
+      const computeAndCacheFreshShort12 = async ({ force = false, refreshShort = false, refreshUltra = false, hard = false } = {}) => {
+        const value = await fetchShortTerm12(env, { force, refreshShort, refreshUltra, hard });
         const nowMs = Date.now();
         const kstMin = kst(nowMs).getUTCMinutes();
         const secsToHour = Math.max(5, Math.ceil((3600000 - (nowMs % 3600000)) / 1000));
@@ -4650,16 +4767,89 @@ export default {
         const pendingUltraRelease = !value?.sources?.ultraBase || Date.parse(value.sources.ultraBase) < Date.parse(expectedUltraIso);
         const completeRegions = (value?.regions || []).filter(r => Array.isArray(r.hours) && r.hours.length > 0).length;
         const isMixed = Boolean(value?.sources?.mixedGeneration);
-        const capSec = (pendingShortRelease || pendingUltraRelease) ? 45 : 300;
-        const maxAge = Math.min(180, secsToHour, minsPast35, capSec);
+        const capSec = (pendingShortRelease || pendingUltraRelease || isMixed) ? 45 : 300;
+        const maxAge = Math.min(isMixed ? 30 : 180, secsToHour, minsPast35, capSec);
         const sMaxAge = Math.min(300, secsToHour, minsPast35, capSec);
-        const bypassAllCache = bypassNow || refreshShort || refreshUltra || completeRegions < 13 || isMixed;
-        const res = jsonResponse(request, env, 200, value, {
-          'Cache-Control': bypassAllCache ? 'no-store' : `public, max-age=${maxAge}, s-maxage=${sMaxAge}, stale-while-revalidate=60`
+        if (completeRegions >= 13) {
+          putEdgeCache(ctx, lastGoodEdgeReq, new Response(JSON.stringify(value), {
+            status: 200,
+            headers: { 'Content-Type': 'application/json; charset=utf-8', 'Cache-Control': 'public, max-age=43200, s-maxage=43200' }
+          }));
+        }
+        return { value, maxAge, sMaxAge, completeRegions, isMixed };
+      };
+
+      // Fresh 캐시 미적중 시: 직전 성공 공유 스냅샷(Last-Good)을 즉시 반환(<50ms)하고 백그라운드에서 KMA 최신화
+      const hasFreshMem = !bypassEdge && Boolean(getCached(shortTerm12FreshCacheKey(Date.now())));
+      if (!bypassEdge && !hasFreshMem && !isArchivalBot) {
+        let lastGood = getCached('short12-global-last-good');
+        if (!lastGood) {
+          try {
+            const edgeSnap = await globalThis.caches?.default?.match(lastGoodEdgeReq);
+            if (edgeSnap) {
+              lastGood = await edgeSnap.json();
+              if (lastGood?.ok) setCached('short12-global-last-good', lastGood, 12 * 3600000);
+            }
+          } catch {}
+        }
+        const nowMs = Date.now();
+        const aligned = lastGood ? alignShortTermSnapshotToNow(lastGood, nowMs, { maxAgeMs: 12 * 3600000 }) : null;
+        if (aligned) {
+          if (ctx && typeof ctx.waitUntil === 'function' && nowMs >= workerHourlyRevalidateUntil) {
+            workerHourlyRevalidateUntil = nowMs + 25000;
+            const freshEdgeKey = edgeCacheRequest(new URL('https://bionda-edge-cache.internal/api/short-term-12?roster=13'), false);
+            ctx.waitUntil((async () => {
+              try {
+                const { value, maxAge, sMaxAge, completeRegions, isMixed } = await computeAndCacheFreshShort12({ force: false });
+                if (completeRegions >= 13 && !isMixed) {
+                  putEdgeCache(null, freshEdgeKey, jsonResponse(request, env, 200, value, {
+                    'Cache-Control': `public, max-age=${maxAge}, s-maxage=${sMaxAge}, stale-while-revalidate=60`
+                  }));
+                }
+              } catch {} finally {
+                workerHourlyRevalidateUntil = 0;
+              }
+            })());
+          }
+          return jsonResponse(request, env, 200, aligned, {
+            'Cache-Control': 'public, max-age=5, s-maxage=15',
+            'X-Bionda-Cache': 'HIT-LAST-GOOD-SWR'
+          });
+        }
+      }
+
+      try {
+        const rsParam = requestUrl.searchParams.get('refreshShort');
+        const ruParam = requestUrl.searchParams.get('refreshUltra');
+        const refreshShort = isHard ? true : (rsParam !== null ? rsParam === '1' : isForced);
+        const refreshUltra = isHard ? true : (ruParam !== null ? ruParam === '1' : isForced);
+        const { value, maxAge, sMaxAge, completeRegions, isMixed } = await computeAndCacheFreshShort12({
+          force: bypassNow,
+          refreshShort,
+          refreshUltra,
+          hard: isHard
         });
-        if (!bypassAllCache) putEdgeCache(ctx, cacheKeyReq, res);
+        const bypassAllCache = bypassNow || refreshShort || refreshUltra || completeRegions < 13;
+        const freshCacheReq = isRevalidate
+          ? edgeCacheRequest(new URL('https://bionda-edge-cache.internal/api/short-term-12?roster=13'), false)
+          : cacheKeyReq;
+        const res = jsonResponse(request, env, 200, value, {
+          'Cache-Control': bypassAllCache ? 'no-store' : `public, max-age=${maxAge}, s-maxage=${sMaxAge}, stale-while-revalidate=60`,
+          'X-Bionda-Cache': isRevalidate ? 'REVALIDATED' : (bypassAllCache ? 'BYPASS' : 'MISS-SEED')
+        });
+        if (!bypassAllCache) putEdgeCache(ctx, freshCacheReq, res);
         return res;
       } catch (e) {
+        if (!bypassNow) {
+          const fallbackSnap = getCached('short12-global-last-good');
+          const aligned = fallbackSnap ? alignShortTermSnapshotToNow(fallbackSnap, Date.now(), { maxAgeMs: 12 * 3600000 }) : null;
+          if (aligned) {
+            return jsonResponse(request, env, 200, aligned, {
+              'Cache-Control': 'no-store',
+              'X-Bionda-Cache': 'FALLBACK-LAST-GOOD'
+            });
+          }
+        }
         return jsonResponse(request, env, 502, { error: errMessage(e) });
       }
     }
